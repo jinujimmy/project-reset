@@ -5,6 +5,7 @@ function onOpen() {
     .addItem("Set up Suggestions and Application status tabs", "setupTrackerTabs")
     .addItem("Score Applications folder", "scoreApplicationsFolder")
     .addItem("Refresh Gmail progress", "refreshGmailProgressOnSheet_")
+    .addItem("Import LinkedIn job links from Gmail", "importLinkedInJobsFromGmail")
     .addSeparator()
     .addItem("Install 8 AM / 6 PM triggers", "installDigestTriggers")
     .addItem("Remove digest triggers", "removeDigestTriggers")
@@ -16,7 +17,7 @@ function onOpen() {
 
 function setupTrackerTabs() {
   ensureTrackerTabs_();
-  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions (new recs) and Application status (your apply list)");
+  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions, Application status, Suggestions - Linkedin");
 }
 
 function runMorningDigest() {
@@ -78,16 +79,15 @@ function runDigest_(label) {
       considered += 1;
       if (scored.percent < CFG.MATCH_THRESHOLD) return;
       if (!isAnalyticsIcJd_(job.description)) return;
-      if (docAlreadyExists_(job.company, job.title)) return;
-      var driveUrl = createRoleDoc_(job, applyDay);
+      if (alreadyRecommended_(job.company, job.title)) return;
       var gmail = inferGmailProgress_(job.company, job.title);
-      recordSuggestedRole_(job, applyDay, driveUrl, gmail.progress, gmail.signal, runAt, label);
+      recordSuggestedRole_(job, applyDay, "", gmail.progress, gmail.signal, runAt, label);
       newMatches.push({
         company: job.company,
         title: job.title,
         percent: job.matchPercent,
         url: job.url,
-        driveUrl: driveUrl,
+        driveUrl: "",
         location: job.location,
         reasons: job.matchReasons
       });
@@ -119,6 +119,7 @@ function continueDigest() {
 function sendDigestEmail_(matches, applyDay, label, errors) {
   var lines = [
     "Canada ATS digest (" + label + "). Recommended apply day: " + applyDay + ".",
+    "Open the job link, then apply. The JD is copied into Applications after Gmail shows you applied.",
     "Coverage ≥70% and JD body is a DA/PA/BI/insights IC seat. Posted title ignored.",
     ""
   ];

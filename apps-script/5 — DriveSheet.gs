@@ -87,7 +87,8 @@ function statusHeaders_() {
     "progress",
     "gmail_signal",
     "url",
-    "drive_doc"
+    "drive_doc",
+    "jd_text"
   ];
 }
 
@@ -120,8 +121,26 @@ function findCompanyRoleRow_(sheet, company, role, companyCol, roleCol) {
   return 0;
 }
 
+function linkedinHeaders_() {
+  return [
+    "found_date",
+    "found_time",
+    "company",
+    "role",
+    "location",
+    "url",
+    "job_id",
+    "email_subject"
+  ];
+}
+
 function reservedTabName_(name) {
-  return name === CFG.SUGGESTIONS_TAB || name === CFG.STATUS_TAB || name === "Folder scores";
+  return (
+    name === CFG.SUGGESTIONS_TAB ||
+    name === CFG.STATUS_TAB ||
+    name === CFG.LINKEDIN_TAB ||
+    name === "Folder scores"
+  );
 }
 
 function ensureTrackerTabs_() {
@@ -137,13 +156,20 @@ function ensureTrackerTabs_() {
     }
   }
   ensureHeaderRow_(status, statusHeaders_());
+  if (status.getMaxColumns() >= 10) status.hideColumns(10);
 
   var suggestions = ss.getSheetByName(CFG.SUGGESTIONS_TAB);
   if (!suggestions) {
     suggestions = ss.insertSheet(CFG.SUGGESTIONS_TAB, 0);
   }
   ensureHeaderRow_(suggestions, suggestionHeaders_());
-  return { ss: ss, suggestions: suggestions, status: status };
+
+  var linkedin = ss.getSheetByName(CFG.LINKEDIN_TAB);
+  if (!linkedin) {
+    linkedin = ss.insertSheet(CFG.LINKEDIN_TAB);
+  }
+  ensureHeaderRow_(linkedin, linkedinHeaders_());
+  return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin };
 }
 
 function appendSuggestionRow_(job, applyDay, driveUrl, runAt, runLabel) {
@@ -177,8 +203,54 @@ function ensureApplicationStatusRow_(job, applyDay, driveUrl, progress, gmailSig
     progress || "not_applied",
     gmailSignal || "none",
     job.url,
-    driveUrl || ""
+    driveUrl || "",
+    String(job.description || "").slice(0, 12000)
   ]);
+}
+
+function alreadyRecommended_(company, role) {
+  var tabs = ensureTrackerTabs_();
+  if (findCompanyRoleRow_(tabs.suggestions, company, role, 3, 4)) return true;
+  if (findCompanyRoleRow_(tabs.status, company, role, 1, 2)) return true;
+  return docAlreadyExists_(company, role);
+}
+
+function progressMeansApplied_(progress) {
+  return (
+    progress === "applied" ||
+    progress === "interview_or_assessment" ||
+    progress === "rejected"
+  );
+}
+
+function jobFromStatusRow_(row) {
+  return {
+    company: String(row[1] || ""),
+    title: String(row[2] || ""),
+    matchPercent: row[3],
+    location: "",
+    url: String(row[7] || ""),
+    description: String(row[9] || ""),
+    matchReasons: []
+  };
+}
+
+function copyJdIfApplied_(sheet, rowNumber, row, applyDay) {
+  if (String(row[8] || "").trim()) return String(row[8]);
+  if (!progressMeansApplied_(String(row[5] || ""))) return "";
+  var job = jobFromStatusRow_(row);
+  if (!job.company || !job.title) return "";
+  var driveUrl = createRoleDoc_(job, applyDay || String(row[4] || ""));
+  sheet.getRange(rowNumber, 9).setValue(driveUrl);
+  sheet.getRange(rowNumber, 1).setValue("filed");
+  stampDriveUrlOnSuggestions_(job.company, job.title, driveUrl);
+  return driveUrl;
+}
+
+function stampDriveUrlOnSuggestions_(company, role, driveUrl) {
+  var sheet = ensureTrackerTabs_().suggestions;
+  var row = findCompanyRoleRow_(sheet, company, role, 3, 4);
+  if (row) sheet.getRange(row, 10).setValue(driveUrl);
 }
 
 function recordSuggestedRole_(job, applyDay, driveUrl, progress, gmailSignal, runAt, runLabel) {
@@ -222,6 +294,7 @@ function inferGmailProgress_(company, role) {
 function refreshGmailProgressOnSheet_() {
   var sheet = ensureTrackerTabs_().status;
   var values = sheet.getDataRange().getValues();
+  var filed = 0;
   for (var i = 1; i < values.length; i++) {
     var company = values[i][1];
     var role = values[i][2];
@@ -229,6 +302,13 @@ function refreshGmailProgressOnSheet_() {
     var inferred = inferGmailProgress_(String(company), String(role || ""));
     if (inferred.progress !== "not_applied") {
       sheet.getRange(i + 1, 6, 1, 2).setValues([[inferred.progress, inferred.signal]]);
+      values[i][5] = inferred.progress;
+      values[i][6] = inferred.signal;
     }
+    var driveUrl = copyJdIfApplied_(sheet, i + 1, values[i], values[i][4]);
+    if (driveUrl && !String(values[i][8] || "").trim()) filed += 1;
   }
+  SpreadsheetApp.getActive().toast(
+    filed ? "Gmail updated. Copied " + filed + " JD" + (filed === 1 ? "" : "s") + " into Applications." : "Gmail progress updated"
+  );
 }

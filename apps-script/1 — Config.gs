@@ -8,7 +8,9 @@ var CFG = {
   BOARD_BATCH: 12,
   MAX_RUNTIME_MS: 270000,
   SUGGESTIONS_TAB: "Suggestions",
-  STATUS_TAB: "Application status"
+  STATUS_TAB: "Application status",
+  LINKEDIN_TAB: "Suggestions - Linkedin",
+  LINKEDIN_LOOKBACK_DAYS: 21
 };
 
 var SKILL_BUCKETS = [
