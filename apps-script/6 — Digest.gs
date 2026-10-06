@@ -10,9 +10,6 @@ function onOpen() {
     .addItem("Install 8 AM / 6 PM triggers", "installDigestTriggers")
     .addItem("Remove digest triggers", "removeDigestTriggers")
     .addToUi();
-  try {
-    ensureTrackerTabs_();
-  } catch (e) {}
 }
 
 function setupTrackerTabs() {
@@ -50,6 +47,11 @@ function removeDigestTriggers() {
 
 function runDigest_(label) {
   ensureTrackerTabs_();
+  if (label !== "continue") {
+    try {
+      importLinkedInJobsFromGmail(true);
+    } catch (e) {}
+  }
   var runAt = new Date();
   var started = Date.now();
   var props = PropertiesService.getScriptProperties();

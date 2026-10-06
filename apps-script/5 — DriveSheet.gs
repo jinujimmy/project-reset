@@ -164,9 +164,10 @@ function ensureTrackerTabs_() {
   }
   ensureHeaderRow_(suggestions, suggestionHeaders_());
 
-  var linkedin = ss.getSheetByName(CFG.LINKEDIN_TAB);
+  var linkedinName = CFG.LINKEDIN_TAB || "Suggestions - Linkedin";
+  var linkedin = ss.getSheetByName(linkedinName);
   if (!linkedin) {
-    linkedin = ss.insertSheet(CFG.LINKEDIN_TAB);
+    linkedin = ss.insertSheet(linkedinName);
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
   return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin };
