@@ -104,6 +104,10 @@ function ensureHeaderRow_(sheet, headers) {
   if (String(header[0]).toLowerCase() !== String(headers[0]).toLowerCase()) {
     sheet.insertRowBefore(1);
     sheet.getRange(1, 1, 1, width).setValues([headers]);
+  } else {
+    for (var h = 0; h < headers.length; h++) {
+      if (!String(header[h] || "").trim()) sheet.getRange(1, h + 1).setValue(headers[h]);
+    }
   }
   sheet.setFrozenRows(1);
 }
@@ -130,7 +134,8 @@ function linkedinHeaders_() {
     "location",
     "url",
     "job_id",
-    "email_subject"
+    "email_subject",
+    "easy_apply"
   ];
 }
 

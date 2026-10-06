@@ -1,7 +1,7 @@
 function importLinkedInJobsFromGmail(optSilent) {
   var tabs = ensureTrackerTabs_();
   var sheet = tabs.linkedin;
-  var known = linkedinKnownIds_(sheet);
+  var known = linkedinKnownRows_(sheet);
   var days = CFG.LINKEDIN_LOOKBACK_DAYS || 21;
   var query =
     "newer_than:" +
@@ -22,7 +22,14 @@ function importLinkedInJobsFromGmail(optSilent) {
         var body = linkedinMessageText_(msg);
         var jobs = parseLinkedInJobs_(body, subject);
         jobs.forEach(function (job) {
-          if (!job.jobId || known[job.jobId] || seenThisRun[job.jobId]) return;
+          if (!job.jobId) return;
+          if (known[job.jobId]) {
+            if (job.easyApply && String(sheet.getRange(known[job.jobId], 9).getValue() || "") !== "yes") {
+              sheet.getRange(known[job.jobId], 9).setValue("yes");
+            }
+            return;
+          }
+          if (seenThisRun[job.jobId]) return;
           seenThisRun[job.jobId] = true;
           var stamp = torontoParts_(msg.getDate() || new Date());
           sheet.appendRow([
@@ -33,9 +40,10 @@ function importLinkedInJobsFromGmail(optSilent) {
             job.location,
             job.url,
             job.jobId,
-            subject
+            subject,
+            job.easyApply ? "yes" : ""
           ]);
-          known[job.jobId] = true;
+          known[job.jobId] = sheet.getLastRow();
           added += 1;
         });
       });
@@ -69,14 +77,14 @@ function linkedinMessageText_(msg) {
   return decodeLinkedInEntities_(plain + "\n" + html);
 }
 
-function linkedinKnownIds_(sheet) {
+function linkedinKnownRows_(sheet) {
   var known = {};
   var values = sheet.getDataRange().getValues();
   for (var i = 1; i < values.length; i++) {
     var id = String(values[i][6] || "").trim();
     var url = String(values[i][5] || "");
     if (!id) id = linkedinJobIdFromUrl_(url);
-    if (id) known[id] = true;
+    if (id) known[id] = i + 1;
   }
   return known;
 }
@@ -103,7 +111,8 @@ function parseLinkedInJobs_(body, subject) {
       url: "https://www.linkedin.com/jobs/view/" + jobId,
       role: parsed.role,
       company: parsed.company,
-      location: parsed.location
+      location: parsed.location,
+      easyApply: /apply with resume|easy apply/i.test(before)
     };
   }
   return Object.keys(jobs).map(function (id) {
