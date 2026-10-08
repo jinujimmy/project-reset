@@ -135,7 +135,8 @@ function linkedinHeaders_() {
     "url",
     "job_id",
     "email_subject",
-    "easy_apply"
+    "easy_apply",
+    "source"
   ];
 }
 

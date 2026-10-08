@@ -10,7 +10,8 @@ var CFG = {
   SUGGESTIONS_TAB: "Suggestions",
   STATUS_TAB: "Application status",
   LINKEDIN_TAB: "Suggestions - Linkedin",
-  LINKEDIN_LOOKBACK_DAYS: 21
+  LINKEDIN_LOOKBACK_DAYS: 21,
+  JOB_ALERT_LABEL: "Job Alerts"
 };
 
 var SKILL_BUCKETS = [
