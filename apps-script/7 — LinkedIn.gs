@@ -3,6 +3,7 @@ function importLinkedInJobsFromGmail(optSilent) {
   var sheet = tabs.linkedin;
   var known = linkedinKnownRows_(sheet);
   backfillAlertSource_(sheet);
+  var feedbackSkips = collectFeedbackSkips_();
   var days = CFG.LINKEDIN_LOOKBACK_DAYS || 21;
   var label = CFG.JOB_ALERT_LABEL || "Job Alerts";
   var query =
@@ -10,12 +11,12 @@ function importLinkedInJobsFromGmail(optSilent) {
     days +
     "d (label:\"" +
     label +
-    "\" OR from:noreply@jobright.ai OR from:jobalerts-noreply@linkedin.com OR from:jobs-noreply@linkedin.com)";
+    "\" OR from:noreply@jobright.ai OR from:donotreply@jobalert.indeed.com OR from:donotreply@match.indeed.com OR from:noreply@glassdoor.com OR from:jobalerts-noreply@linkedin.com OR from:jobs-noreply@linkedin.com)";
   var added = 0;
   var seenThisRun = {};
   var start = 0;
   var pageSize = 50;
-  var maxThreads = 250;
+  var maxThreads = 300;
 
   while (start < maxThreads) {
     var threads = GmailApp.search(query, start, pageSize);
@@ -28,7 +29,11 @@ function importLinkedInJobsFromGmail(optSilent) {
           html = String(msg.getBody() || "");
         } catch (eHtml) {}
         var body = linkedinMessageText_(msg);
-        var jobs = parseLinkedInJobs_(body, subject).concat(parseJobrightJobs_(html || body, subject));
+        var blob = html || body;
+        var jobs = parseLinkedInJobs_(body, subject)
+          .concat(parseJobrightJobs_(blob, subject))
+          .concat(parseIndeedJobs_(blob, subject))
+          .concat(parseGlassdoorJobs_(blob, subject));
         jobs.forEach(function (job) {
           if (!job.jobId) return;
           if (known[job.jobId]) {
@@ -38,6 +43,7 @@ function importLinkedInJobsFromGmail(optSilent) {
             return;
           }
           if (seenThisRun[job.jobId]) return;
+          if (isSkippedByFeedback_(job.company, job.role, feedbackSkips)) return;
           seenThisRun[job.jobId] = true;
           var stamp = torontoParts_(msg.getDate() || new Date());
           sheet.appendRow([
@@ -50,7 +56,8 @@ function importLinkedInJobsFromGmail(optSilent) {
             job.jobId,
             subject,
             job.easyApply ? "yes" : "",
-            job.source || alertSourceFromUrl_(job.url)
+            job.source || alertSourceFromUrl_(job.url),
+            ""
           ]);
           known[job.jobId] = sheet.getLastRow();
           added += 1;
@@ -90,6 +97,8 @@ function alertSourceFromUrl_(url) {
   var u = String(url || "").toLowerCase();
   if (u.indexOf("linkedin.com") !== -1) return "LinkedIn";
   if (u.indexOf("jobright.ai") !== -1) return "Jobright";
+  if (u.indexOf("indeed.com") !== -1) return "Indeed";
+  if (u.indexOf("glassdoor.com") !== -1) return "Glassdoor";
   return "";
 }
 
@@ -280,16 +289,162 @@ function parseJobrightSubject_(subject) {
   return { role: "", company: "" };
 }
 
+function parseIndeedJobs_(html, subject) {
+  var text = decodeLinkedInEntities_(String(html || "").replace(/\r/g, "\n"));
+  var jobs = {};
+  var re = /https?:\/\/(?:[\w.-]+\.)?indeed\.com\/[^\s"'<>]*[?&]jk=([a-f0-9]+)/gi;
+  var match;
+  while ((match = re.exec(text))) {
+    var jk = match[1];
+    var jobId = "indeed_" + jk;
+    if (jobs[jobId]) continue;
+    var raw = match[0].toLowerCase();
+    if (raw.indexOf("/jobs?") !== -1 && raw.indexOf("jk=") === -1) continue;
+    var before = text.slice(Math.max(0, match.index - 500), match.index);
+    var parsed = parseIndeedCardText_(before);
+    if (!parsed.role) {
+      var fromSubject = parseAtCompanySubject_(subject);
+      parsed.role = fromSubject.role;
+      if (!parsed.company) parsed.company = fromSubject.company;
+    }
+    jobs[jobId] = {
+      jobId: jobId,
+      url: "https://www.indeed.com/viewjob?jk=" + jk,
+      role: parsed.role,
+      company: parsed.company,
+      location: parsed.location,
+      easyApply: /easily apply/i.test(before),
+      source: "Indeed"
+    };
+  }
+  return Object.keys(jobs).map(function (id) {
+    return jobs[id];
+  });
+}
+
+function parseIndeedCardText_(chunk) {
+  var lines = String(chunk || "")
+    .split("\n")
+    .map(function (line) {
+      return line.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    })
+    .filter(function (line) {
+      if (!line) return false;
+      if (/^https?:\/\//i.test(line)) return false;
+      if (/^easily apply$/i.test(line)) return false;
+      if (/just posted|days? ago|responsive employer/i.test(line)) return false;
+      if (/^\$|CA\$|₹|a year|an hour/i.test(line)) return false;
+      if (/indeed job alert/i.test(line)) return false;
+      if (/see matching results/i.test(line)) return false;
+      if (line.length > 220) return false;
+      return true;
+    });
+  var role = "";
+  var company = "";
+  var location = "";
+  if (lines.length >= 2) {
+    role = lines[lines.length - 2];
+    var coLoc = lines[lines.length - 1].match(/^(.*?)\s+[-–]\s+(.+)$/);
+    if (coLoc) {
+      company = coLoc[1].trim();
+      location = coLoc[2].trim();
+    } else {
+      company = lines[lines.length - 1];
+    }
+  } else if (lines.length === 1) {
+    role = lines[0];
+  }
+  return { role: role, company: company, location: location };
+}
+
+function parseGlassdoorJobs_(html, subject) {
+  var text = decodeLinkedInEntities_(String(html || "").replace(/\r/g, "\n"));
+  var jobs = {};
+  var re = /https?:\/\/(?:www\.)?glassdoor\.com\/partner\/jobListing\.htm\?[^\s"'<>]*jobListingId=(\d+)/gi;
+  var match;
+  while ((match = re.exec(text))) {
+    var listingId = match[1];
+    var jobId = "gd_" + listingId;
+    if (jobs[jobId]) continue;
+    var before = text.slice(Math.max(0, match.index - 600), match.index);
+    var parsed = parseGlassdoorCardText_(before);
+    if (!parsed.role) {
+      var fromSubject = parseAtCompanySubject_(subject);
+      parsed.role = fromSubject.role;
+      if (!parsed.company) parsed.company = fromSubject.company;
+    }
+    jobs[jobId] = {
+      jobId: jobId,
+      url: "https://www.glassdoor.com/job-listing/job.htm?jl=" + listingId,
+      role: parsed.role,
+      company: parsed.company,
+      location: parsed.location,
+      easyApply: /easy apply/i.test(before),
+      source: "Glassdoor"
+    };
+  }
+  return Object.keys(jobs).map(function (id) {
+    return jobs[id];
+  });
+}
+
+function parseGlassdoorCardText_(chunk) {
+  var lines = String(chunk || "")
+    .split("\n")
+    .map(function (line) {
+      return line.replace(/\u00a0/g, " ").replace(/\ufeff/g, "").replace(/\|/g, " ").replace(/\s+/g, " ").trim();
+    })
+    .filter(function (line) {
+      if (!line) return false;
+      if (/^https?:\/\//i.test(line)) return false;
+      if (/^easy apply$/i.test(line)) return false;
+      if (/^job alert/i.test(line)) return false;
+      if (/your job listings/i.test(line)) return false;
+      if (/glassdoor est|employer est/i.test(line)) return false;
+      if (/^CA\$|^\$|★/.test(line) && line.length < 40) return false;
+      if (/^\d+[dh]$|^just posted$/i.test(line)) return false;
+      if (line.length > 160) return false;
+      return true;
+    });
+  var role = "";
+  var company = "";
+  var location = "";
+  if (lines.length >= 3) {
+    company = lines[lines.length - 3].replace(/\s*\d+(\.\d+)?\s*$/, "").trim();
+    role = lines[lines.length - 2];
+    location = lines[lines.length - 1];
+  } else if (lines.length === 2) {
+    company = lines[0];
+    role = lines[1];
+  } else if (lines.length === 1) {
+    role = lines[0];
+  }
+  return { role: role, company: company, location: location };
+}
+
+function parseAtCompanySubject_(subject) {
+  var text = String(subject || "").replace(/\s+and \d+ more.*$/i, "").trim();
+  var at = text.match(/^(.*?)\s+at\s+(.+?)(?:\s+in\s+(.+))?$/i);
+  if (at) return { role: at[1].trim(), company: at[2].replace(/\s*@\s*/g, "").trim(), location: (at[3] || "").trim() };
+  return { role: text, company: "" };
+}
+
 function linkedinJobIdFromUrl_(url) {
   var match = String(url || "").match(/\/jobs\/view\/(\d+)/i);
   return match ? match[1] : "";
 }
 
 function alertJobIdFromUrl_(url) {
-  var linkedin = linkedinJobIdFromUrl_(url);
+  var u = String(url || "");
+  var linkedin = linkedinJobIdFromUrl_(u);
   if (linkedin) return linkedin;
-  var jobright = String(url || "").match(/jobright\.ai\/jobs\/info\/([a-f0-9]+)/i);
-  return jobright ? jobright[1] : "";
+  var jobright = u.match(/jobright\.ai\/jobs\/info\/([a-f0-9]+)/i);
+  if (jobright) return jobright[1];
+  var indeed = u.match(/[?&]jk=([a-f0-9]+)/i);
+  if (indeed && /indeed\.com/i.test(u)) return "indeed_" + indeed[1];
+  var gd = u.match(/jobListingId=(\d+)/i) || u.match(/[?&]jl=(\d+)/i);
+  if (gd && /glassdoor\.com/i.test(u)) return "gd_" + gd[1];
+  return "";
 }
 
 function decodeLinkedInEntities_(text) {
