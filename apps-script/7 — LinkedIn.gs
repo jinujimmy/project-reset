@@ -3,7 +3,10 @@ function importLinkedInJobsFromGmail(optSilent) {
   var sheet = tabs.linkedin;
   var known = linkedinKnownRows_(sheet);
   backfillAlertSource_(sheet);
-  var feedbackSkips = collectFeedbackSkips_();
+  var feedbackSkips = { companies: {}, roles: {} };
+  try {
+    feedbackSkips = collectFeedbackSkips_();
+  } catch (eSkip) {}
   var days = CFG.LINKEDIN_LOOKBACK_DAYS || 21;
   var label = CFG.JOB_ALERT_LABEL || "Job Alerts";
   var query =
@@ -29,11 +32,20 @@ function importLinkedInJobsFromGmail(optSilent) {
           html = String(msg.getBody() || "");
         } catch (eHtml) {}
         var body = linkedinMessageText_(msg);
-        var blob = html || body;
-        var jobs = parseLinkedInJobs_(body, subject)
-          .concat(parseJobrightJobs_(blob, subject))
-          .concat(parseIndeedJobs_(blob, subject))
-          .concat(parseGlassdoorJobs_(blob, subject));
+        var blob = (html || "") + "\n" + (body || "");
+        var jobs = [];
+        try {
+          jobs = jobs.concat(parseLinkedInJobs_(body, subject));
+        } catch (eLi) {}
+        try {
+          jobs = jobs.concat(parseJobrightJobs_(blob, subject));
+        } catch (eJr) {}
+        try {
+          jobs = jobs.concat(parseIndeedJobs_(blob, subject));
+        } catch (eIn) {}
+        try {
+          jobs = jobs.concat(parseGlassdoorJobs_(blob, subject));
+        } catch (eGd) {}
         jobs.forEach(function (job) {
           if (!job.jobId) return;
           if (known[job.jobId]) {
@@ -203,20 +215,18 @@ function parseLinkedInSubject_(subject) {
 }
 
 function parseJobrightJobs_(html, subject) {
-  var text = decodeLinkedInEntities_(
-    String(html || "")
-      .replace(/\r/g, "\n")
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<\/(p|div|tr|h[1-6])>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-  );
+  var raw = decodeLinkedInEntities_(String(html || "").replace(/\r/g, "\n"));
   var jobs = {};
   var re = /https?:\/\/(?:www\.)?jobright\.ai\/jobs\/info\/([a-f0-9]+)/gi;
   var match;
-  while ((match = re.exec(text))) {
+  while ((match = re.exec(raw))) {
     var jobId = match[1];
     if (jobs[jobId]) continue;
-    var before = text.slice(Math.max(0, match.index - 900), match.index);
+    var before = raw
+      .slice(Math.max(0, match.index - 2500), match.index)
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|tr|h[1-6])>/gi, "\n")
+      .replace(/<[^>]+>/g, " ");
     var parsed = parseJobrightCardText_(before);
     if (!parsed.role || !parsed.company) {
       var fromSubject = parseJobrightSubject_(subject);

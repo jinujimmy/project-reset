@@ -184,13 +184,13 @@ function ensureTrackerTabs_() {
 }
 
 function ensureFeedbackDropdown_(sheet, col) {
-  var last = Math.max(sheet.getMaxRows(), 2);
+  var last = Math.max(sheet.getLastRow(), 2);
   var rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(["skip company", "skip role"], true)
     .setAllowInvalid(true)
     .setHelpText("skip company = hide this employer next run. skip role = hide this job title next run.")
     .build();
-  sheet.getRange(2, col, last - 1, 1).setDataValidation(rule);
+  sheet.getRange(2, col, last, 1).setDataValidation(rule);
 }
 
 function headerColIndex_(sheet, name) {
