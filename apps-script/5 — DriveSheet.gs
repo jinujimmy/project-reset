@@ -73,7 +73,8 @@ function suggestionHeaders_() {
     "location",
     "url",
     "drive_doc",
-    "reasons"
+    "reasons",
+    "feedback"
   ];
 }
 
@@ -135,7 +136,9 @@ function linkedinHeaders_() {
     "url",
     "job_id",
     "email_subject",
-    "easy_apply"
+    "easy_apply",
+    "source",
+    "feedback"
   ];
 }
 
@@ -168,6 +171,7 @@ function ensureTrackerTabs_() {
     suggestions = ss.insertSheet(CFG.SUGGESTIONS_TAB, 0);
   }
   ensureHeaderRow_(suggestions, suggestionHeaders_());
+  ensureFeedbackDropdown_(suggestions, suggestionHeaders_().length);
 
   var linkedinName = CFG.LINKEDIN_TAB || "Suggestions - Linkedin";
   var linkedin = ss.getSheetByName(linkedinName);
@@ -175,7 +179,74 @@ function ensureTrackerTabs_() {
     linkedin = ss.insertSheet(linkedinName);
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
+  ensureFeedbackDropdown_(linkedin, linkedinHeaders_().length);
   return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin };
+}
+
+function ensureFeedbackDropdown_(sheet, col) {
+  var last = Math.max(sheet.getMaxRows(), 2);
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["skip company", "skip role"], true)
+    .setAllowInvalid(true)
+    .setHelpText("skip company = hide this employer next run. skip role = hide this job title next run.")
+    .build();
+  sheet.getRange(2, col, last - 1, 1).setDataValidation(rule);
+}
+
+function headerColIndex_(sheet, name) {
+  var last = Math.max(sheet.getLastColumn(), 1);
+  var header = sheet.getRange(1, 1, 1, last).getValues()[0];
+  var want = String(name || "").toLowerCase();
+  for (var i = 0; i < header.length; i++) {
+    if (String(header[i] || "").toLowerCase() === want) return i;
+  }
+  return -1;
+}
+
+function normalizeFeedbackLabel_(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectFeedbackSkips_() {
+  var tabs = ensureTrackerTabs_();
+  var companies = {};
+  var roles = {};
+  function ingest_(sheet, companyKey, roleKey) {
+    if (!sheet) return;
+    var fb = headerColIndex_(sheet, "feedback");
+    var companyCol = headerColIndex_(sheet, companyKey);
+    var roleCol = headerColIndex_(sheet, roleKey);
+    if (fb < 0 || companyCol < 0 || roleCol < 0) return;
+    var values = sheet.getDataRange().getValues();
+    for (var i = 1; i < values.length; i++) {
+      var label = normalizeFeedbackLabel_(values[i][fb]);
+      var company = String(values[i][companyCol] || "").toLowerCase().trim();
+      var role = String(values[i][roleCol] || "").toLowerCase().replace(/\s+/g, " ").trim();
+      if (label === "skip company" && company) companies[company] = true;
+      if (label === "skip role" && role) roles[role] = true;
+    }
+  }
+  ingest_(tabs.linkedin, "company", "role");
+  ingest_(tabs.suggestions, "company", "role");
+  return { companies: companies, roles: roles };
+}
+
+function isSkippedByFeedback_(company, role, skips) {
+  var bag = skips || collectFeedbackSkips_();
+  var c = String(company || "").toLowerCase().trim();
+  var r = String(role || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (c) {
+    var names = Object.keys(bag.companies);
+    for (var i = 0; i < names.length; i++) {
+      if (c.indexOf(names[i]) !== -1 || names[i].indexOf(c) !== -1) return true;
+    }
+  }
+  if (r && bag.roles[r]) return true;
+  return false;
 }
 
 function appendSuggestionRow_(job, applyDay, driveUrl, runAt, runLabel) {

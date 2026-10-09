@@ -64,6 +64,7 @@ function runDigest_(label) {
   var errors = [];
   var considered = 0;
   var end = Math.min(boards.length, cursor + CFG.BOARD_BATCH);
+  var feedbackSkips = collectFeedbackSkips_();
 
   for (var i = cursor; i < end; i++) {
     if (Date.now() - started > CFG.MAX_RUNTIME_MS) {
@@ -74,6 +75,7 @@ function runDigest_(label) {
     if (fetched.error) errors.push(boards[i].company + ": " + fetched.error);
     (fetched.jobs || []).forEach(function (job) {
       if (isAlreadyAppliedCompany_(job.company)) return;
+      if (isSkippedByFeedback_(job.company, job.title, feedbackSkips)) return;
       if (!isCanadaEligible_(job.location, job.description)) return;
       var scored = scoreAgainstTargetJd_(job.description);
       job.matchPercent = scored.percent;
