@@ -55,7 +55,7 @@ function importLinkedInJobsFromGmail(optSilent) {
             return;
           }
           if (seenThisRun[job.jobId]) return;
-          if (isSkippedByFeedback_(job.company, job.role, feedbackSkips)) return;
+          if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
           seenThisRun[job.jobId] = true;
           var stamp = torontoParts_(msg.getDate() || new Date());
           sheet.appendRow([

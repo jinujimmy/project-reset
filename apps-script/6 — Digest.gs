@@ -75,7 +75,7 @@ function runDigest_(label) {
     if (fetched.error) errors.push(boards[i].company + ": " + fetched.error);
     (fetched.jobs || []).forEach(function (job) {
       if (isAlreadyAppliedCompany_(job.company)) return;
-      if (isSkippedByFeedback_(job.company, job.title, feedbackSkips)) return;
+      if (isSkippedByFeedback_(job.company, job.title, feedbackSkips, job.url)) return;
       if (!isCanadaEligible_(job.location, job.description)) return;
       var scored = scoreAgainstTargetJd_(job.description);
       job.matchPercent = scored.percent;
