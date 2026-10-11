@@ -52,7 +52,9 @@ function importLinkedInJobsFromGmail(optSilent) {
         jobs.forEach(function (job) {
           if (!job.jobId) return;
           if (known[job.jobId]) {
-            if (!digest) refreshAlertRow_(sheet, known[job.jobId], job, subject);
+            if (!digest || job.source === "Jobright") {
+              refreshAlertRow_(sheet, known[job.jobId], job, subject);
+            }
             return;
           }
           if (seenThisRun[job.jobId]) return;
@@ -223,8 +225,13 @@ function parseJobrightJobs_(html, subject) {
   while ((match = re.exec(raw))) {
     var jobId = match[1];
     if (jobs[jobId]) continue;
-    var parsed = parseJobrightHtmlCard_(raw.slice(match.index, match.index + 4000));
-    if (!parsed.role) parsed = parseJobrightCardText_(htmlToAlertText_(raw.slice(match.index, match.index + 4000)));
+    var parsed = parseJobrightHtmlCard_(raw.slice(match.index, match.index + 5000));
+    if (!parsed.role || !parsed.company) {
+      var fromText = parseJobrightCardText_(htmlToAlertText_(raw.slice(match.index, match.index + 5000)));
+      if (!parsed.company) parsed.company = fromText.company;
+      if (!parsed.role) parsed.role = fromText.role;
+      if (!parsed.location) parsed.location = fromText.location;
+    }
     if (isDigestHeadline_(parsed.role, subject)) parsed.role = "";
     if (!parsed.role || !parsed.company) {
       var fromSubject = parseJobrightSubject_(subject);
@@ -247,7 +254,22 @@ function parseJobrightJobs_(html, subject) {
 }
 
 function parseJobrightHtmlCard_(chunk) {
-  return parseJobrightCardText_(htmlToAlertText_(chunk));
+  var texts = [];
+  var re = />([^<]{1,140})</g;
+  var m;
+  while ((m = re.exec(String(chunk || "")))) {
+    var t = decodeLinkedInEntities_(m[1]).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    if (!t) continue;
+    if (/^apply now$/i.test(t)) continue;
+    if (/^[\u200b\s]+$/.test(t)) continue;
+    if (/·/.test(t)) continue;
+    if (/^[\d.]+\s*%$/.test(t)) continue;
+    if (/^\$|CA\$|\/yr/i.test(t)) continue;
+    if (/^https?:/i.test(t)) continue;
+    if (/[{}<>]|href=|important|;$|font-|style=/i.test(t)) continue;
+    texts.push(t);
+  }
+  return parseJobrightCardText_(texts.join("\n"));
 }
 
 function parseJobrightCardText_(chunk) {
@@ -277,7 +299,7 @@ function parseJobrightCardText_(chunk) {
   var location = "";
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i];
-    if (/^(remote|hybrid)\b/i.test(line) || /,\s*[A-Z]{2}\b/.test(line) || /\b(toronto|montreal|vancouver|calgary|ottawa|canada)\b/i.test(line)) {
+    if (isAlertLocationLine_(line)) {
       if (!location) location = line;
       continue;
     }
@@ -335,7 +357,8 @@ function isDigestHeadline_(text, subject) {
 function looksLikeCssOrJd_(text) {
   var t = String(text || "").trim();
   if (!t) return true;
-  if (/[{}]|font-family|font-weight|margin:|padding:|rgba?\(|!important|display:|text-decoration|border-radius/i.test(t)) {
+  if (/^ant;$/i.test(t) || /href=|^<a\b|^<\//i.test(t)) return true;
+  if (/[{}<>]|font-family|font-weight|margin:|padding:|rgba?\(|!important|display:|text-decoration|border-radius/i.test(t)) {
     return true;
   }
   if (t.length > 80) return true;
@@ -347,6 +370,16 @@ function looksLikeCssOrJd_(text) {
     return true;
   }
   return false;
+}
+
+function isAlertLocationLine_(line) {
+  var t = String(line || "").trim();
+  if (/^(remote|hybrid)\b/i.test(t)) return true;
+  if (/,\s*[A-Z]{2}\b/.test(t)) return true;
+  return (
+    /^(toronto|montreal|vancouver|calgary|ottawa|edmonton|markham|mississauga|brampton|canada)\b/i.test(t) &&
+    t.split(/\s+/).length <= 4
+  );
 }
 
 function looksLikeCompanyName_(text) {
