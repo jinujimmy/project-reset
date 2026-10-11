@@ -147,6 +147,7 @@ function reservedTabName_(name) {
     name === CFG.SUGGESTIONS_TAB ||
     name === CFG.STATUS_TAB ||
     name === CFG.LINKEDIN_TAB ||
+    name === (CFG.CATALOG_TAB || "Catalog") ||
     name === "Folder scores"
   );
 }
@@ -180,7 +181,9 @@ function ensureTrackerTabs_() {
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
   ensureFeedbackDropdown_(linkedin, linkedinHeaders_().length);
-  return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin };
+
+  var catalog = ensureCatalogTab_(ss);
+  return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin, catalog: catalog };
 }
 
 function ensureFeedbackDropdown_(sheet, col) {

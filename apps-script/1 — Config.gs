@@ -10,6 +10,7 @@ var CFG = {
   SUGGESTIONS_TAB: "Suggestions",
   STATUS_TAB: "Application status",
   LINKEDIN_TAB: "Suggestions - Linkedin",
+  CATALOG_TAB: "Catalog",
   LINKEDIN_LOOKBACK_DAYS: 21,
   JOB_ALERT_LABEL: "Job Alerts"
 };

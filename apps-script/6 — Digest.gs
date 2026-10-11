@@ -14,7 +14,7 @@ function onOpen() {
 
 function setupTrackerTabs() {
   ensureTrackerTabs_();
-  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions, Application status, Suggestions - Linkedin");
+  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions, Application status, Suggestions - Linkedin, Catalog");
 }
 
 function runMorningDigest() {
@@ -56,9 +56,7 @@ function runDigest_(label) {
   var started = Date.now();
   var props = PropertiesService.getScriptProperties();
   var cursor = Number(props.getProperty("boardCursor") || "0");
-  var boards = defaultCatalog_().filter(function (b) {
-    return b.enabled;
-  });
+  var boards = activeCatalog_();
   var applyDay = recommendedApplyDay_();
   var newMatches = [];
   var errors = [];
