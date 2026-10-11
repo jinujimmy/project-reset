@@ -147,6 +147,7 @@ function reservedTabName_(name) {
     name === CFG.SUGGESTIONS_TAB ||
     name === CFG.STATUS_TAB ||
     name === CFG.LINKEDIN_TAB ||
+    name === (CFG.CATALOG_TAB || "Catalog") ||
     name === "Folder scores"
   );
 }
@@ -180,17 +181,19 @@ function ensureTrackerTabs_() {
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
   ensureFeedbackDropdown_(linkedin, linkedinHeaders_().length);
-  return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin };
+
+  var catalog = ensureCatalogTab_(ss);
+  return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin, catalog: catalog };
 }
 
 function ensureFeedbackDropdown_(sheet, col) {
-  var last = Math.max(sheet.getMaxRows(), 2);
+  var last = Math.max(sheet.getLastRow(), 2);
   var rule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(["skip company", "skip role"], true)
+    .requireValueInList(["skip company", "skip role", "expired"], true)
     .setAllowInvalid(true)
-    .setHelpText("skip company = hide this employer next run. skip role = hide this job title next run.")
+    .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting (same URL or company + role).")
     .build();
-  sheet.getRange(2, col, last - 1, 1).setDataValidation(rule);
+  sheet.getRange(2, col, last, 1).setDataValidation(rule);
 }
 
 function headerColIndex_(sheet, name) {
@@ -215,11 +218,14 @@ function collectFeedbackSkips_() {
   var tabs = ensureTrackerTabs_();
   var companies = {};
   var roles = {};
+  var expiredUrls = {};
+  var expiredJobs = {};
   function ingest_(sheet, companyKey, roleKey) {
     if (!sheet) return;
     var fb = headerColIndex_(sheet, "feedback");
     var companyCol = headerColIndex_(sheet, companyKey);
     var roleCol = headerColIndex_(sheet, roleKey);
+    var urlCol = headerColIndex_(sheet, "url");
     if (fb < 0 || companyCol < 0 || roleCol < 0) return;
     var values = sheet.getDataRange().getValues();
     for (var i = 1; i < values.length; i++) {
@@ -228,25 +234,51 @@ function collectFeedbackSkips_() {
       var role = String(values[i][roleCol] || "").toLowerCase().replace(/\s+/g, " ").trim();
       if (label === "skip company" && company) companies[company] = true;
       if (label === "skip role" && role) roles[role] = true;
+      if (label === "expired") {
+        if (company && role) expiredJobs[company + "\t" + role] = true;
+        if (urlCol >= 0) {
+          var url = normalizeJobUrl_(values[i][urlCol]);
+          if (url) expiredUrls[url] = true;
+        }
+      }
     }
   }
   ingest_(tabs.linkedin, "company", "role");
   ingest_(tabs.suggestions, "company", "role");
-  return { companies: companies, roles: roles };
+  return { companies: companies, roles: roles, expiredUrls: expiredUrls, expiredJobs: expiredJobs };
 }
 
-function isSkippedByFeedback_(company, role, skips) {
+function normalizeJobUrl_(url) {
+  var u = String(url || "").trim();
+  if (!u) return "";
+  u = u.replace(/[?&#]utm_[^&#]*/gi, "");
+  u = u.replace(/[?&]$/, "");
+  return u.toLowerCase();
+}
+
+function isExpiredPosting_(company, role, url, skips) {
+  var bag = skips || collectFeedbackSkips_();
+  var key =
+    String(company || "").toLowerCase().trim() +
+    "\t" +
+    String(role || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (bag.expiredJobs && bag.expiredJobs[key]) return true;
+  var n = normalizeJobUrl_(url);
+  return Boolean(n && bag.expiredUrls && bag.expiredUrls[n]);
+}
+
+function isSkippedByFeedback_(company, role, skips, url) {
   var bag = skips || collectFeedbackSkips_();
   var c = String(company || "").toLowerCase().trim();
   var r = String(role || "").toLowerCase().replace(/\s+/g, " ").trim();
   if (c) {
-    var names = Object.keys(bag.companies);
+    var names = Object.keys(bag.companies || {});
     for (var i = 0; i < names.length; i++) {
       if (c.indexOf(names[i]) !== -1 || names[i].indexOf(c) !== -1) return true;
     }
   }
-  if (r && bag.roles[r]) return true;
-  return false;
+  if (r && bag.roles && bag.roles[r]) return true;
+  return isExpiredPosting_(company, role, url, bag);
 }
 
 function appendSuggestionRow_(job, applyDay, driveUrl, runAt, runLabel) {
@@ -283,6 +315,26 @@ function ensureApplicationStatusRow_(job, applyDay, driveUrl, progress, gmailSig
     driveUrl || "",
     String(job.description || "").slice(0, 12000)
   ]);
+}
+
+function alreadyRecommendedKey_(company, role) {
+  return String(company || "").toLowerCase().trim() + "\t" + String(role || "").toLowerCase().trim();
+}
+
+function collectAlreadyRecommendedKeys_() {
+  var tabs = ensureTrackerTabs_();
+  var keys = {};
+  function ingest_(sheet, companyCol, roleCol) {
+    if (!sheet) return;
+    var values = sheet.getDataRange().getValues();
+    for (var i = 1; i < values.length; i++) {
+      var key = alreadyRecommendedKey_(values[i][companyCol], values[i][roleCol]);
+      if (key !== "\t") keys[key] = true;
+    }
+  }
+  ingest_(tabs.suggestions, 3, 4);
+  ingest_(tabs.status, 1, 2);
+  return keys;
 }
 
 function alreadyRecommended_(company, role) {

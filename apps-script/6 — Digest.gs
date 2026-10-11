@@ -14,7 +14,7 @@ function onOpen() {
 
 function setupTrackerTabs() {
   ensureTrackerTabs_();
-  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions, Application status, Suggestions - Linkedin");
+  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions, Application status, Suggestions - Linkedin, Catalog");
 }
 
 function runMorningDigest() {
@@ -56,15 +56,14 @@ function runDigest_(label) {
   var started = Date.now();
   var props = PropertiesService.getScriptProperties();
   var cursor = Number(props.getProperty("boardCursor") || "0");
-  var boards = defaultCatalog_().filter(function (b) {
-    return b.enabled;
-  });
+  var boards = activeCatalog_();
   var applyDay = recommendedApplyDay_();
   var newMatches = [];
   var errors = [];
   var considered = 0;
   var end = Math.min(boards.length, cursor + CFG.BOARD_BATCH);
   var feedbackSkips = collectFeedbackSkips_();
+  var already = collectAlreadyRecommendedKeys_();
 
   for (var i = cursor; i < end; i++) {
     if (Date.now() - started > CFG.MAX_RUNTIME_MS) {
@@ -75,7 +74,7 @@ function runDigest_(label) {
     if (fetched.error) errors.push(boards[i].company + ": " + fetched.error);
     (fetched.jobs || []).forEach(function (job) {
       if (isAlreadyAppliedCompany_(job.company)) return;
-      if (isSkippedByFeedback_(job.company, job.title, feedbackSkips)) return;
+      if (isSkippedByFeedback_(job.company, job.title, feedbackSkips, job.url)) return;
       if (!isCanadaEligible_(job.location, job.description)) return;
       var scored = scoreAgainstTargetJd_(job.description);
       job.matchPercent = scored.percent;
@@ -83,9 +82,14 @@ function runDigest_(label) {
       considered += 1;
       if (scored.percent < CFG.MATCH_THRESHOLD) return;
       if (!isAnalyticsIcJd_(job.description)) return;
-      if (alreadyRecommended_(job.company, job.title)) return;
-      var gmail = inferGmailProgress_(job.company, job.title);
-      recordSuggestedRole_(job, applyDay, "", gmail.progress, gmail.signal, runAt, label);
+      var recKey = alreadyRecommendedKey_(job.company, job.title);
+      if (already[recKey]) return;
+      if (docAlreadyExists_(job.company, job.title)) {
+        already[recKey] = true;
+        return;
+      }
+      already[recKey] = true;
+      recordSuggestedRole_(job, applyDay, "", "not_applied", "none", runAt, label);
       newMatches.push({
         company: job.company,
         title: job.title,
@@ -109,7 +113,6 @@ function runDigest_(label) {
   var pendingFinal = JSON.parse(props.getProperty("pendingMatches") || "[]").concat(newMatches);
   props.deleteProperty("boardCursor");
   props.deleteProperty("pendingMatches");
-  refreshGmailProgressOnSheet_();
   if (pendingFinal.length) sendDigestEmail_(pendingFinal, applyDay, label, errors);
 }
 
