@@ -317,6 +317,26 @@ function ensureApplicationStatusRow_(job, applyDay, driveUrl, progress, gmailSig
   ]);
 }
 
+function alreadyRecommendedKey_(company, role) {
+  return String(company || "").toLowerCase().trim() + "\t" + String(role || "").toLowerCase().trim();
+}
+
+function collectAlreadyRecommendedKeys_() {
+  var tabs = ensureTrackerTabs_();
+  var keys = {};
+  function ingest_(sheet, companyCol, roleCol) {
+    if (!sheet) return;
+    var values = sheet.getDataRange().getValues();
+    for (var i = 1; i < values.length; i++) {
+      var key = alreadyRecommendedKey_(values[i][companyCol], values[i][roleCol]);
+      if (key !== "\t") keys[key] = true;
+    }
+  }
+  ingest_(tabs.suggestions, 3, 4);
+  ingest_(tabs.status, 1, 2);
+  return keys;
+}
+
 function alreadyRecommended_(company, role) {
   var tabs = ensureTrackerTabs_();
   if (findCompanyRoleRow_(tabs.suggestions, company, role, 3, 4)) return true;

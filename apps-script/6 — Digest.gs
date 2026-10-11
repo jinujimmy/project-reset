@@ -63,6 +63,7 @@ function runDigest_(label) {
   var considered = 0;
   var end = Math.min(boards.length, cursor + CFG.BOARD_BATCH);
   var feedbackSkips = collectFeedbackSkips_();
+  var already = collectAlreadyRecommendedKeys_();
 
   for (var i = cursor; i < end; i++) {
     if (Date.now() - started > CFG.MAX_RUNTIME_MS) {
@@ -81,9 +82,14 @@ function runDigest_(label) {
       considered += 1;
       if (scored.percent < CFG.MATCH_THRESHOLD) return;
       if (!isAnalyticsIcJd_(job.description)) return;
-      if (alreadyRecommended_(job.company, job.title)) return;
-      var gmail = inferGmailProgress_(job.company, job.title);
-      recordSuggestedRole_(job, applyDay, "", gmail.progress, gmail.signal, runAt, label);
+      var recKey = alreadyRecommendedKey_(job.company, job.title);
+      if (already[recKey]) return;
+      if (docAlreadyExists_(job.company, job.title)) {
+        already[recKey] = true;
+        return;
+      }
+      already[recKey] = true;
+      recordSuggestedRole_(job, applyDay, "", "not_applied", "none", runAt, label);
       newMatches.push({
         company: job.company,
         title: job.title,
@@ -107,7 +113,6 @@ function runDigest_(label) {
   var pendingFinal = JSON.parse(props.getProperty("pendingMatches") || "[]").concat(newMatches);
   props.deleteProperty("boardCursor");
   props.deleteProperty("pendingMatches");
-  refreshGmailProgressOnSheet_();
   if (pendingFinal.length) sendDigestEmail_(pendingFinal, applyDay, label, errors);
 }
 
