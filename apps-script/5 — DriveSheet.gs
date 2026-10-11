@@ -189,9 +189,9 @@ function ensureTrackerTabs_() {
 function ensureFeedbackDropdown_(sheet, col) {
   var last = Math.max(sheet.getLastRow(), 2);
   var rule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(["skip company", "skip role", "expired"], true)
+    .requireValueInList(["skip company", "skip role", "expired", "apply later"], true)
     .setAllowInvalid(true)
-    .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting (same URL or company + role).")
+    .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting. apply later = keep the row, do not skip next run.")
     .build();
   sheet.getRange(2, col, last, 1).setDataValidation(rule);
 }
