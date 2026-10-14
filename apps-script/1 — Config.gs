@@ -96,6 +96,7 @@ var SOFT_NEGATIVE_SIGNALS = [
   "user stories and acceptance criteria"
 ];
 
+/** Unused by digest. Skip is per listing (applied Yes / status applied), not whole company. */
 var APPLIED_COMPANY_SKIP = [
   "caseware",
   "mckesson",

@@ -61,17 +61,20 @@ function importLinkedInJobsFromGmail(optSilent) {
           if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
           seenThisRun[job.jobId] = true;
           var stamp = torontoParts_(msg.getDate() || new Date());
+          var company = cleanAlertField_(job.company, "company");
           sheet.appendRow([
             stamp.date,
             stamp.time,
-            cleanAlertField_(job.company, "company"),
-            cleanAlertField_(job.role, "role"),
+            company,
+            cleanAlertField_(job.role, "role", company),
             cleanAlertField_(job.location, "location"),
             job.url,
             job.jobId,
             subject,
             job.easyApply ? "yes" : "",
             job.source || alertSourceFromUrl_(job.url),
+            "",
+            "No",
             ""
           ]);
           known[job.jobId] = sheet.getLastRow();
@@ -170,8 +173,8 @@ function parseLinkedInJobs_(body, subject) {
     jobs[jobId] = {
       jobId: jobId,
       url: "https://www.linkedin.com/jobs/view/" + jobId,
-      role: cleanAlertField_(parsed.role, "role"),
       company: cleanAlertField_(parsed.company, "company"),
+      role: cleanAlertField_(parsed.role, "role", parsed.company),
       location: cleanAlertField_(parsed.location, "location"),
       easyApply: /apply with resume|easy apply/i.test(before),
       source: "LinkedIn"
@@ -277,8 +280,8 @@ function parseJobrightJobs_(html, subject) {
     jobs[jobId] = {
       jobId: jobId,
       url: "https://jobright.ai/jobs/info/" + jobId,
-      role: cleanAlertField_(parsed.role, "role"),
       company: cleanAlertField_(parsed.company, "company"),
+      role: cleanAlertField_(parsed.role, "role", parsed.company),
       location: cleanAlertField_(parsed.location, "location"),
       easyApply: false,
       source: "Jobright"
@@ -432,11 +435,117 @@ function looksLikeCompanyName_(text) {
   return t.length >= 2 && t.length <= 100;
 }
 
-function cleanAlertField_(value, kind) {
+function stripRegionFromRole_(role) {
+  var t = String(role || "").trim();
+  if (/^jobs similar to/i.test(t)) return "";
+  if (/^[A-Za-z .]+,\s*[A-Z]{2}$/.test(t)) return "";
+  if (/^(burlington|regina|milton|toronto|ottawa|cincinnati|finance|marketing|big data|cyber security|artificial intelligence(?:\s*\(ai\))?)$/i.test(t)) {
+    return "";
+  }
+  t = t.replace(/\s*\(#[\w.-]+\)/g, "");
+  t = t.replace(/\s*\(\d{3,5}\)\s*$/g, "");
+  t = t.replace(/\s*[-–—]?\s*FT\s*\([A-Z]?\d[\w-]*\)/gi, "");
+  t = t.replace(/\s*\([A-Z]\d{3,}-\d+\)/g, "");
+  t = t.replace(/\s*\(\s*\d+\s*(?:-|–)?\s*\d*\s*(months?|years?|mos?|weeks?|wks?)\s*(contract)?\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*\d+\s*[-–]?\s*mos?\s*contract\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*\d+\s*[-–]?\s*month\s*contract\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*\d+month\s*contract\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*up to\s+\d+\s+months?\s*\)/gi, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*[-–]?\s*(month|year)s?\s+contract\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+-month\s+contract\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*months?\s*(temporary\s+)?(contract)?\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*yr\.?\s+onsite\b.*$/i, "");
+  t = t.replace(/\s*\(\s*temporary\s*:[^)]+\)/gi, "");
+  t = t.replace(/\s*\((?:contract|hybrid|remote|onsite|on-site)\)/gi, "");
+  t = t.replace(/\s*\(multiple levels\)/gi, "");
+  t = t.replace(/\s*\(aka\.?[^)]*\)/gi, "");
+  t = t.replace(/\s*\(\s*CAN\s*\)/gi, "");
+  t = t.replace(/\s*[-–—]\s*\d{2,5}\s+[A-Z]{2,4}\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*[A-Z]{2,4}\s+\d{2,5}\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*$/g, "");
+  t = t.replace(/\s+L\d\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*(remote|hybrid|contract)\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*[^,]{2,40},\s*[A-Z]{2}\s*$/i, "");
+  t = t.replace(/\s*\([^()]{2,40},\s*[A-Z]{2}\)\s*$/i, "");
+  t = t.replace(
+    /\s*[-–,]\s*(toronto|montreal|vancouver|calgary|ottawa|edmonton|mississauga|brampton|markham|etobicoke|milton|regina|burlington|canada)\s*$/i,
+    ""
+  );
+  t = t.replace(
+    /\s*[-–—]\s*(toronto|montreal|vancouver|calgary|ottawa|edmonton|mississauga|brampton|markham|etobicoke|milton)\b.*$/i,
+    ""
+  );
+  return t.replace(/[,\s-]+$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function isTitleStartWord_(word) {
+  return /^(senior|junior|staff|lead|leader|principal|manager|analyst|engineer|scientist|consultant|director|associate|specialist|coordinator|developer|product|data|business|program|project|intern|actuarial|financial|marketing|pricing|credit|risk|research|technical|national|master|operations|client|commercial|digital|investment|payroll|privacy|procurement|supply|tax|people|decision|analytics|bilingual|temporary|intermediate|information|workday|microsoft|chief|assistant)$/i.test(
+    word
+  );
+}
+
+function looksLikeEmployerTail_(phrase, company) {
+  var t = String(phrase || "").trim();
+  var c = String(company || "").trim();
+  if (!t || t.length < 3) return false;
+  var tl = t.toLowerCase();
+  var cl = c.toLowerCase();
+  if (cl && (tl === cl || (c.length >= 5 && tl.indexOf(cl) !== -1) || (t.length >= 5 && cl.indexOf(tl) !== -1))) {
+    return true;
+  }
+  if (/\b(inc\.?|ltd\.?|llc|corp\.?|limited)\b/i.test(t)) return true;
+  return /^(tangerine|simplii financial|rogers sports & media|abbott diabetes care)$/i.test(t);
+}
+
+function stripEmployerFromRole_(role, company) {
+  var t = String(role || "").trim();
+  var c = String(company || "").trim();
+  if (c && c.length >= 2) {
+    var esc = c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    t = t.replace(new RegExp("^" + esc + "\\s*[-–—:|]\\s*", "i"), "");
+    t = t.replace(new RegExp("\\s*[-–—|]\\s*" + esc + "\\s*$", "i"), "");
+    t = t.replace(new RegExp("\\s+" + esc + "\\s*$", "i"), "");
+    var first = c.split(/\s+/)[0];
+    if (first.length >= 4 && !isTitleStartWord_(first)) {
+      var fe = first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      t = t.replace(new RegExp("^" + fe + "\\s*[-–—:]\\s+", "i"), "");
+      t = t.replace(new RegExp("\\s+" + fe + "\\s*$", "i"), "");
+    }
+  }
+  var firstRole = t.split(/\s+/)[0] || "";
+  if (!isTitleStartWord_(firstRole)) {
+    t = t.replace(
+      /^[A-Z][A-Za-z0-9.&']{2,}(?:\s+[A-Z][A-Za-z0-9.&']+){0,3}\s*[-–—]\s+(?=(Senior|Staff|Lead|Principal|Manager|Analyst|Engineer|Scientist|Consultant|Director|Associate|Specialist|Coordinator|Developer|Product|Data|Business|Program|Project|Intern)\b)/,
+      ""
+    );
+  }
+  var m = t.match(/\s*[-–—]\s+([^–—-]{2,50})$/);
+  if (m && looksLikeEmployerTail_(m[1], company)) t = t.slice(0, m.index);
+  return t.replace(/[,\s-]+$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeRoleTitle_(role) {
+  var t = String(role || "").trim();
+  t = t.replace(/\bSnr\.\s*/gi, "Senior ");
+  t = t.replace(/\bSr\.\s*/gi, "Senior ");
+  t = t.replace(/\bMgr\.\s*/gi, "Manager ");
+  t = t.replace(/\bSnr\b/gi, "Senior");
+  t = t.replace(/\bSr\b/gi, "Senior");
+  t = t.replace(/\bMgr\b/gi, "Manager");
+  t = t.replace(/,\s*Senior\.?\s*$/i, "");
+  return t.replace(/\s+/g, " ").trim();
+}
+
+function cleanAlertField_(value, kind, company) {
   var t = decodeLinkedInEntities_(String(value || "")).replace(/\s+/g, " ").trim();
   if (isBlankAlert_(t)) return "";
   if (kind === "company" && !looksLikeCompanyName_(t)) return "";
   if (kind !== "company" && looksLikeCssOrJd_(t)) return "";
+  if (kind === "role") {
+    t = stripRegionFromRole_(t);
+    t = stripEmployerFromRole_(t, company);
+    t = normalizeRoleTitle_(t);
+  }
   return t;
 }
 
@@ -472,8 +581,8 @@ function refreshAlertRow_(sheet, row, job, subject) {
     isLinkedInChrome_(oldLoc) ||
     isBlankAlert_(oldRole) ||
     isBlankAlert_(oldCompany);
-  var role = cleanAlertField_(job.role, "role");
   var company = cleanAlertField_(job.company, "company");
+  var role = cleanAlertField_(job.role, "role", company || oldCompany);
   var loc = cleanAlertField_(job.location, "location");
   if (role && (!oldRole || copied || looksLikeCssOrJd_(oldRole) || isBlankAlert_(oldRole))) sheet.getRange(row, 4).setValue(role);
   if (company && (!oldCompany || copied || looksLikeCssOrJd_(oldCompany) || isBlankAlert_(oldCompany))) sheet.getRange(row, 3).setValue(company);
@@ -501,8 +610,8 @@ function parseIndeedJobs_(html, subject) {
     jobs[jobId] = {
       jobId: jobId,
       url: "https://www.indeed.com/viewjob?jk=" + jk,
-      role: cleanAlertField_(parsed.role, "role"),
       company: cleanAlertField_(parsed.company, "company"),
+      role: cleanAlertField_(parsed.role, "role", parsed.company),
       location: cleanAlertField_(parsed.location, "location"),
       easyApply: /easily apply/i.test(before),
       source: "Indeed"
@@ -584,8 +693,8 @@ function addGlassdoorJob_(jobs, listingId, chunk, subject) {
   jobs[jobId] = {
     jobId: jobId,
     url: "https://www.glassdoor.com/job-listing/job.htm?jl=" + listingId,
-    role: cleanAlertField_(parsed.role, "role"),
     company: cleanAlertField_(parsed.company, "company"),
+    role: cleanAlertField_(parsed.role, "role", parsed.company),
     location: cleanAlertField_(parsed.location, "location"),
     easyApply: /easy apply/i.test(chunk),
     source: "Glassdoor"

@@ -15,10 +15,7 @@ function htmlToPlain_(input) {
 }
 
 function isAlreadyAppliedCompany_(company) {
-  var c = String(company || "").toLowerCase();
-  return APPLIED_COMPANY_SKIP.some(function (name) {
-    return c.indexOf(name) !== -1;
-  });
+  return false;
 }
 
 var CANADA_PLACE_ =

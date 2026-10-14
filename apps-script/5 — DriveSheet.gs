@@ -3,13 +3,29 @@ function applicationsRoot_() {
 }
 
 function findChildFolder_(parent, name) {
-  var it = parent.getFoldersByName(name);
-  return it.hasNext() ? it.next() : null;
+  var want = String(name || "").toLowerCase().trim();
+  if (!want) return null;
+  var exact = parent.getFoldersByName(name);
+  if (exact.hasNext()) return exact.next();
+  var it = parent.getFolders();
+  while (it.hasNext()) {
+    var folder = it.next();
+    if (String(folder.getName() || "").toLowerCase().trim() === want) return folder;
+  }
+  return null;
 }
 
 function findChildFile_(parent, name) {
-  var it = parent.getFilesByName(name);
-  return it.hasNext() ? it.next() : null;
+  var want = String(name || "").toLowerCase().trim();
+  if (!want) return null;
+  var exact = parent.getFilesByName(name);
+  if (exact.hasNext()) return exact.next();
+  var it = parent.getFiles();
+  while (it.hasNext()) {
+    var file = it.next();
+    if (String(file.getName() || "").toLowerCase().trim() === want) return file;
+  }
+  return null;
 }
 
 function ensureCompanyFolder_(company) {
@@ -34,7 +50,7 @@ function createRoleDoc_(job, applyDay) {
     job.company,
     job.location,
     job.url,
-    "Match: " + job.matchPercent + "%",
+    "Match: " + (job.matchPercent === "" || job.matchPercent == null ? "n/a" : job.matchPercent + "%"),
     "Recommended apply: " + applyDay,
     "Reasons: " + (job.matchReasons || []).join("; "),
     "",
@@ -138,7 +154,9 @@ function linkedinHeaders_() {
     "email_subject",
     "easy_apply",
     "source",
-    "feedback"
+    "feedback",
+    "applied",
+    "drive_doc"
   ];
 }
 
@@ -180,7 +198,9 @@ function ensureTrackerTabs_() {
     linkedin = ss.insertSheet(linkedinName);
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
-  ensureFeedbackDropdown_(linkedin, linkedinHeaders_().length);
+  var linkedinHeaders = linkedinHeaders_();
+  ensureFeedbackDropdown_(linkedin, headerColIndex_(linkedin, "feedback") + 1 || 11);
+  ensureAppliedDropdown_(linkedin, headerColIndex_(linkedin, "applied") + 1 || linkedinHeaders.length);
 
   var catalog = ensureCatalogTab_(ss);
   return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin, catalog: catalog };
@@ -194,6 +214,263 @@ function ensureFeedbackDropdown_(sheet, col) {
     .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting. apply later = keep the row, do not skip next run.")
     .build();
   sheet.getRange(2, col, last, 1).setDataValidation(rule);
+}
+
+function ensureAppliedDropdown_(sheet, col) {
+  if (!col || col < 1) return;
+  var last = Math.max(sheet.getLastRow(), 2);
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["No", "Yes"], true)
+    .setAllowInvalid(true)
+    .setHelpText("Manual: Yes = applied, No = not applied. Import does not change this.")
+    .build();
+  sheet.getRange(2, col, last, 1).setDataValidation(rule);
+  var values = sheet.getRange(2, col, last, 1).getValues();
+  var wrote = false;
+  for (var i = 0; i < values.length; i++) {
+    var cur = String(values[i][0] || "").trim().toLowerCase();
+    var next = "";
+    if (!cur || cur === "not applied" || cur === "no") next = "No";
+    else if (cur === "applied" || cur === "yes") next = "Yes";
+    if (next && String(values[i][0] || "") !== next) {
+      values[i][0] = next;
+      wrote = true;
+    }
+  }
+  if (wrote) sheet.getRange(2, col, last, 1).setValues(values);
+}
+
+function isLinkedinAppliedYes_(value) {
+  var v = String(value || "").trim().toLowerCase();
+  return v === "yes" || v === "applied";
+}
+
+function ensureJdInboxFolder_() {
+  var root = applicationsRoot_();
+  return findChildFolder_(root, "_Inbox") || root.createFolder("_Inbox");
+}
+
+function looksLikeFullJd_(text) {
+  var t = String(text || "").replace(/\s+/g, " ").trim();
+  if (t.length < 700) return false;
+  if (/sign in|log in to continue|verify you are human|jobright instant alert|you may be a fit|always be the first to apply/i.test(t)) {
+    return false;
+  }
+  return true;
+}
+
+function fetchPublicJd_(url) {
+  var u = String(url || "");
+  if (!/indeed\.com|glassdoor\.com/i.test(u)) return "";
+  try {
+    var res = UrlFetchApp.fetch(u, { muteHttpExceptions: true, followRedirects: true });
+    if (res.getResponseCode() >= 400) return "";
+    var text = htmlToAlertText_(res.getContentText() || "").slice(0, 12000);
+    return looksLikeFullJd_(text) ? text : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function scoreInboxName_(filename, job) {
+  var n = String(filename || "").toLowerCase();
+  var company = String(job.company || "").toLowerCase().trim();
+  var role = String(job.role || "").toLowerCase().trim();
+  var score = 0;
+  if (job.jobId && n.indexOf(String(job.jobId).toLowerCase()) !== -1) score += 6;
+  if (job.url) {
+    var m = String(job.url).match(/[?&](?:jl|jk)=([a-z0-9]+)/i) || String(job.url).match(/\/info\/([a-f0-9]+)/i);
+    if (m && n.indexOf(m[1].toLowerCase()) !== -1) score += 6;
+  }
+  if (company.length >= 4 && n.indexOf(company) !== -1) score += 3;
+  var first = company.split(/\s+/)[0] || "";
+  if (first.length >= 4 && n.indexOf(first) !== -1) score += 2;
+  var words = role.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(function (w) {
+    return w.length > 3;
+  }).slice(0, 5);
+  var hits = 0;
+  words.forEach(function (w) {
+    if (n.indexOf(w) !== -1) hits += 1;
+  });
+  if (hits >= 2) score += 2;
+  return score;
+}
+
+function linkedinRowJob_(sheet, rowNumber) {
+  var width = Math.max(sheet.getLastColumn(), linkedinHeaders_().length);
+  var header = sheet.getRange(1, 1, 1, width).getValues()[0];
+  function col(name) {
+    var want = String(name).toLowerCase();
+    for (var i = 0; i < header.length; i++) {
+      if (String(header[i] || "").toLowerCase() === want) return i;
+    }
+    return -1;
+  }
+  var row = sheet.getRange(rowNumber, 1, 1, width).getValues()[0];
+  return {
+    row: rowNumber,
+    company: String(row[col("company")] || "").trim(),
+    role: String(row[col("role")] || "").trim(),
+    url: String(row[col("url")] || "").trim(),
+    jobId: String(row[col("job_id")] || "").trim(),
+    location: String(row[col("location")] || "").trim(),
+    applied: row[col("applied")],
+    driveDoc: col("drive_doc") >= 0 ? String(row[col("drive_doc")] || "").trim() : "",
+    docCol: col("drive_doc")
+  };
+}
+
+function stampLinkedinDriveDoc_(sheet, rowNumber, docCol, url) {
+  if (docCol >= 0 && url) sheet.getRange(rowNumber, docCol + 1).setValue(url);
+}
+
+function placeInboxPdf_(file, company, role) {
+  var folder = ensureCompanyFolder_(company);
+  var dest = role + ".pdf";
+  if (file.getName() !== dest) file.setName(dest);
+  folder.addFile(file);
+  var inbox = findChildFolder_(applicationsRoot_(), "_Inbox");
+  if (inbox) {
+    try {
+      inbox.removeFile(file);
+    } catch (e) {}
+  }
+  return file.getUrl();
+}
+
+function findInboxPdfForJob_(job) {
+  var inbox = findChildFolder_(applicationsRoot_(), "_Inbox");
+  if (!inbox) return null;
+  var it = inbox.getFiles();
+  var best = null;
+  var bestScore = 0;
+  var ties = 0;
+  while (it.hasNext()) {
+    var file = it.next();
+    var mime = String(file.getMimeType() || "");
+    if (mime && mime !== MimeType.PDF && !/\.pdf$/i.test(file.getName())) continue;
+    var score = scoreInboxName_(file.getName(), job);
+    if (score > bestScore) {
+      best = file;
+      bestScore = score;
+      ties = 1;
+    } else if (score === bestScore && score > 0) {
+      ties += 1;
+    }
+  }
+  if (!best || bestScore < 3 || ties > 1) return null;
+  return best;
+}
+
+function copyLinkedinJdForRow_(sheet, rowNumber) {
+  if (rowNumber < 2) return "";
+  var job = linkedinRowJob_(sheet, rowNumber);
+  if (!isLinkedinAppliedYes_(job.applied)) return "";
+  if (job.driveDoc) return job.driveDoc;
+  if (!job.company || !job.role) return "";
+  if (docAlreadyExists_(job.company, job.role)) {
+    var folder = findChildFolder_(applicationsRoot_(), job.company);
+    var existing = folder ? findChildFile_(folder, job.role) : null;
+    var existingUrl = existing ? existing.getUrl() : "";
+    stampLinkedinDriveDoc_(sheet, rowNumber, job.docCol, existingUrl);
+    return existingUrl;
+  }
+  var inboxFile = findInboxPdfForJob_(job);
+  if (inboxFile) {
+    var pdfUrl = placeInboxPdf_(inboxFile, job.company, job.role);
+    stampLinkedinDriveDoc_(sheet, rowNumber, job.docCol, pdfUrl);
+    return pdfUrl;
+  }
+  var desc = fetchPublicJd_(job.url);
+  if (!desc) return "";
+  var driveUrl = createRoleDoc_(
+    {
+      title: job.role,
+      company: job.company,
+      location: job.location,
+      url: job.url,
+      matchPercent: "",
+      matchReasons: ["full posting from the public job page"],
+      description: desc
+    },
+    torontoParts_(new Date()).date
+  );
+  stampLinkedinDriveDoc_(sheet, rowNumber, job.docCol, driveUrl);
+  return driveUrl;
+}
+
+function fileInboxJdPdfs() {
+  ensureJdInboxFolder_();
+  var sheet = ensureTrackerTabs_().linkedin;
+  var appliedCol = headerColIndex_(sheet, "applied");
+  var last = sheet.getLastRow();
+  var filed = 0;
+  var unmatched = 0;
+  if (appliedCol < 0 || last < 2) {
+    SpreadsheetApp.getActive().toast("Set up tabs first.");
+    return;
+  }
+  var inbox = findChildFolder_(applicationsRoot_(), "_Inbox");
+  var files = inbox ? inbox.getFiles() : null;
+  if (!files || !files.hasNext()) {
+    SpreadsheetApp.getActive().toast("Applications/_Inbox is empty. Print the posting to PDF and drop it there.");
+    return;
+  }
+  while (files.hasNext()) {
+    var file = files.next();
+    var jobs = [];
+    for (var r = 2; r <= last; r++) {
+      var job = linkedinRowJob_(sheet, r);
+      if (!isLinkedinAppliedYes_(job.applied) || job.driveDoc) continue;
+      jobs.push(job);
+    }
+    var best = null;
+    var bestScore = 0;
+    var ties = 0;
+    jobs.forEach(function (job) {
+      var score = scoreInboxName_(file.getName(), job);
+      if (score > bestScore) {
+        best = job;
+        bestScore = score;
+        ties = 1;
+      } else if (score === bestScore && score > 0) {
+        ties += 1;
+      }
+    });
+    if (!best || bestScore < 3 || ties > 1) {
+      unmatched += 1;
+      continue;
+    }
+    var url = placeInboxPdf_(file, best.company, best.role);
+    stampLinkedinDriveDoc_(sheet, best.row, best.docCol, url);
+    filed += 1;
+  }
+  SpreadsheetApp.getActive().toast(
+    filed
+      ? "Filed " + filed + " PDF" + (filed === 1 ? "" : "s") + " into company folders" + (unmatched ? ". " + unmatched + " left in _Inbox (rename with company name)." : "")
+      : "Could not match inbox PDFs. Rename them like “Tokyo Smoke Data Analyst.pdf”."
+  );
+}
+
+function copyAppliedLinkedinJds() {
+  fileInboxJdPdfs();
+  var sheet = ensureTrackerTabs_().linkedin;
+  var appliedCol = headerColIndex_(sheet, "applied");
+  var docCol = headerColIndex_(sheet, "drive_doc");
+  if (appliedCol < 0) return;
+  var values = sheet.getDataRange().getValues();
+  var filed = 0;
+  var missing = 0;
+  for (var i = 1; i < values.length; i++) {
+    if (!isLinkedinAppliedYes_(values[i][appliedCol])) continue;
+    if (docCol >= 0 && String(values[i][docCol] || "").trim()) continue;
+    if (copyLinkedinJdForRow_(sheet, i + 1)) filed += 1;
+    else missing += 1;
+  }
+  SpreadsheetApp.getActive().toast(
+    (filed ? "Filed " + filed + " full JD" + (filed === 1 ? "" : "s") + ". " : "") +
+      (missing ? missing + " applied row(s) still need a print-to-PDF in Applications/_Inbox." : filed ? "" : "No new full JDs.")
+  );
 }
 
 function headerColIndex_(sheet, name) {
@@ -319,6 +596,52 @@ function ensureApplicationStatusRow_(job, applyDay, driveUrl, progress, gmailSig
 
 function alreadyRecommendedKey_(company, role) {
   return String(company || "").toLowerCase().trim() + "\t" + String(role || "").toLowerCase().trim();
+}
+
+function collectAppliedListingKeys_() {
+  var tabs = ensureTrackerTabs_();
+  var keys = {};
+  var urls = {};
+  function add_(company, role, url) {
+    var key = alreadyRecommendedKey_(company, role);
+    if (key !== "\t") keys[key] = true;
+    var n = normalizeJobUrl_(url);
+    if (n) urls[n] = true;
+  }
+  var linkedin = tabs.linkedin;
+  if (linkedin) {
+    var appliedCol = headerColIndex_(linkedin, "applied");
+    var companyCol = headerColIndex_(linkedin, "company");
+    var roleCol = headerColIndex_(linkedin, "role");
+    var urlCol = headerColIndex_(linkedin, "url");
+    var values = linkedin.getDataRange().getValues();
+    for (var i = 1; i < values.length; i++) {
+      if (appliedCol >= 0 && !isLinkedinAppliedYes_(values[i][appliedCol])) continue;
+      if (appliedCol < 0) continue;
+      add_(
+        companyCol >= 0 ? values[i][companyCol] : "",
+        roleCol >= 0 ? values[i][roleCol] : "",
+        urlCol >= 0 ? values[i][urlCol] : ""
+      );
+    }
+  }
+  var status = tabs.status;
+  if (status) {
+    var rows = status.getDataRange().getValues();
+    for (var s = 1; s < rows.length; s++) {
+      if (!progressMeansApplied_(String(rows[s][5] || ""))) continue;
+      add_(rows[s][1], rows[s][2], rows[s][7]);
+    }
+  }
+  return { keys: keys, urls: urls };
+}
+
+function isAlreadyAppliedListing_(company, role, url, bag) {
+  var applied = bag || collectAppliedListingKeys_();
+  var key = alreadyRecommendedKey_(company, role);
+  if (key !== "\t" && applied.keys && applied.keys[key]) return true;
+  var n = normalizeJobUrl_(url);
+  return Boolean(n && applied.urls && applied.urls[n]);
 }
 
 function collectAlreadyRecommendedKeys_() {

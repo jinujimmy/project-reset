@@ -6,6 +6,8 @@ function onOpen() {
     .addItem("Score Applications folder", "scoreApplicationsFolder")
     .addItem("Refresh Gmail progress", "refreshGmailProgressOnSheet_")
     .addItem("Import LinkedIn job links from Gmail", "importLinkedInJobsFromGmail")
+    .addItem("Copy JDs for applied Linkedin rows", "copyAppliedLinkedinJds")
+    .addItem("File inbox PDFs into company folders", "fileInboxJdPdfs")
     .addSeparator()
     .addItem("Install 8 AM / 6 PM triggers", "installDigestTriggers")
     .addItem("Remove digest triggers", "removeDigestTriggers")
@@ -14,7 +16,21 @@ function onOpen() {
 
 function setupTrackerTabs() {
   ensureTrackerTabs_();
-  SpreadsheetApp.getActive().toast("Tabs ready: Suggestions, Application status, Suggestions - Linkedin, Catalog");
+  ensureJdInboxFolder_();
+  SpreadsheetApp.getActive().toast("Tabs ready. Drop print-to-PDF JDs in Applications/_Inbox.");
+}
+
+function onEdit(e) {
+  if (!e || !e.range) return;
+  var sheet = e.range.getSheet();
+  if (sheet.getName() !== (CFG.LINKEDIN_TAB || "Suggestions - Linkedin")) return;
+  if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
+  var appliedCol = headerColIndex_(sheet, "applied") + 1;
+  if (appliedCol < 1 || e.range.getColumn() !== appliedCol) return;
+  if (!isLinkedinAppliedYes_(e.value)) return;
+  try {
+    copyLinkedinJdForRow_(sheet, e.range.getRow());
+  } catch (err) {}
 }
 
 function runMorningDigest() {
@@ -64,6 +80,7 @@ function runDigest_(label) {
   var end = Math.min(boards.length, cursor + CFG.BOARD_BATCH);
   var feedbackSkips = collectFeedbackSkips_();
   var already = collectAlreadyRecommendedKeys_();
+  var applied = collectAppliedListingKeys_();
 
   for (var i = cursor; i < end; i++) {
     if (Date.now() - started > CFG.MAX_RUNTIME_MS) {
@@ -73,7 +90,7 @@ function runDigest_(label) {
     var fetched = fetchBoardJobs_(boards[i]);
     if (fetched.error) errors.push(boards[i].company + ": " + fetched.error);
     (fetched.jobs || []).forEach(function (job) {
-      if (isAlreadyAppliedCompany_(job.company)) return;
+      if (isAlreadyAppliedListing_(job.company, job.title, job.url, applied)) return;
       if (isSkippedByFeedback_(job.company, job.title, feedbackSkips, job.url)) return;
       if (!isCanadaEligible_(job.location, job.description)) return;
       var scored = scoreAgainstTargetJd_(job.description);
