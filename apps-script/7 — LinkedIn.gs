@@ -59,14 +59,16 @@ function importLinkedInJobsFromGmail(optSilent) {
           }
           if (seenThisRun[job.jobId]) return;
           if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
+          var company = cleanAlertField_(job.company, "company");
+          var role = cleanAlertField_(job.role, "role", company);
+          if (!company && !role) return;
           seenThisRun[job.jobId] = true;
           var stamp = torontoParts_(msg.getDate() || new Date());
-          var company = cleanAlertField_(job.company, "company");
           sheet.appendRow([
             stamp.date,
             stamp.time,
             company,
-            cleanAlertField_(job.role, "role", company),
+            role,
             cleanAlertField_(job.location, "location"),
             job.url,
             job.jobId,

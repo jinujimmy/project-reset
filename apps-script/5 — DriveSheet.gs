@@ -109,23 +109,34 @@ function statusHeaders_() {
   ];
 }
 
+function normalizeHeaderName_(value) {
+  var t = String(value || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (t === "not applied") return "applied";
+  return t;
+}
+
 function ensureHeaderRow_(sheet, headers) {
   var width = headers.length;
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, width).setValues([headers]);
+    sheet.getRange(1, 1, 1, width).clearDataValidations().setFontWeight("bold");
     sheet.setFrozenRows(1);
     return;
   }
   var last = Math.max(sheet.getLastColumn(), width);
   var header = sheet.getRange(1, 1, 1, last).getValues()[0];
-  if (String(header[0]).toLowerCase() !== String(headers[0]).toLowerCase()) {
-    sheet.insertRowBefore(1);
-    sheet.getRange(1, 1, 1, width).setValues([headers]);
-  } else {
-    for (var h = 0; h < headers.length; h++) {
-      if (!String(header[h] || "").trim()) sheet.getRange(1, h + 1).setValue(headers[h]);
-    }
+  var first = normalizeHeaderName_(header[0]);
+  var expected = normalizeHeaderName_(headers[0]);
+  var row1IsData = /^\d{4}-\d{2}-\d{2}/.test(String(header[0] || "").trim()) || first === "yes" || first === "no";
+  if (row1IsData || (first && first !== expected)) {
+    if (first !== expected) sheet.insertRowBefore(1);
   }
+  sheet.getRange(1, 1, 1, width).setValues([headers]);
+  sheet.getRange(1, 1, 1, width).clearDataValidations().setFontWeight("bold");
   sheet.setFrozenRows(1);
 }
 
@@ -198,46 +209,80 @@ function ensureTrackerTabs_() {
     linkedin = ss.insertSheet(linkedinName);
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
-  var linkedinHeaders = linkedinHeaders_();
-  ensureFeedbackDropdown_(linkedin, headerColIndex_(linkedin, "feedback") + 1 || 11);
-  ensureAppliedDropdown_(linkedin, headerColIndex_(linkedin, "applied") + 1 || linkedinHeaders.length);
+  compactLinkedinBlankRows_(linkedin);
+  var appliedCol = headerColIndex_(linkedin, "applied") + 1;
+  var feedbackCol = headerColIndex_(linkedin, "feedback") + 1;
+  ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11);
+  ensureAppliedDropdown_(linkedin, appliedCol > 0 ? appliedCol : 12);
 
   var catalog = ensureCatalogTab_(ss);
   return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin, catalog: catalog };
 }
 
+function dataRowCount_(sheet) {
+  return Math.max(sheet.getLastRow() - 1, 1);
+}
+
 function ensureFeedbackDropdown_(sheet, col) {
-  var last = Math.max(sheet.getLastRow(), 2);
+  if (!col || col < 1) return;
+  var n = dataRowCount_(sheet);
   var rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(["skip company", "skip role", "expired", "apply later"], true)
     .setAllowInvalid(true)
     .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting. apply later = keep the row, do not skip next run.")
     .build();
-  sheet.getRange(2, col, last, 1).setDataValidation(rule);
+  sheet.getRange(2, col, n, 1).setDataValidation(rule);
 }
 
 function ensureAppliedDropdown_(sheet, col) {
   if (!col || col < 1) return;
-  var last = Math.max(sheet.getLastRow(), 2);
+  var n = dataRowCount_(sheet);
   var rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(["No", "Yes"], true)
     .setAllowInvalid(true)
     .setHelpText("Manual: Yes = applied, No = not applied. Import does not change this.")
     .build();
-  sheet.getRange(2, col, last, 1).setDataValidation(rule);
-  var values = sheet.getRange(2, col, last, 1).getValues();
+  sheet.getRange(2, col, n, 1).setDataValidation(rule);
+  var urlCol = headerColIndex_(sheet, "url");
+  var companyCol = headerColIndex_(sheet, "company");
+  var width = Math.max(sheet.getLastColumn(), col);
+  var rows = sheet.getRange(2, 1, n, width).getValues();
+  var appliedVals = [];
   var wrote = false;
-  for (var i = 0; i < values.length; i++) {
-    var cur = String(values[i][0] || "").trim().toLowerCase();
-    var next = "";
-    if (!cur || cur === "not applied" || cur === "no") next = "No";
-    else if (cur === "applied" || cur === "yes") next = "Yes";
-    if (next && String(values[i][0] || "") !== next) {
-      values[i][0] = next;
-      wrote = true;
-    }
+  for (var i = 0; i < rows.length; i++) {
+    var hasJob =
+      (urlCol >= 0 && String(rows[i][urlCol] || "").trim()) ||
+      (companyCol >= 0 && String(rows[i][companyCol] || "").trim());
+    var cur = String(rows[i][col - 1] || "").trim();
+    var low = cur.toLowerCase();
+    var next = cur;
+    if (!hasJob) {
+      if (cur) {
+        next = "";
+        wrote = true;
+      }
+    } else if (!low || low === "not applied" || low === "no") next = "No";
+    else if (low === "applied" || low === "yes") next = "Yes";
+    if (next !== cur) wrote = true;
+    appliedVals.push([next]);
   }
-  if (wrote) sheet.getRange(2, col, last, 1).setValues(values);
+  if (wrote) sheet.getRange(2, col, n, 1).setValues(appliedVals);
+}
+
+function compactLinkedinBlankRows_(sheet) {
+  if (!sheet) return;
+  var last = sheet.getLastRow();
+  if (last < 2) return;
+  var urlCol = headerColIndex_(sheet, "url");
+  var companyCol = headerColIndex_(sheet, "company");
+  var jobIdCol = headerColIndex_(sheet, "job_id");
+  var values = sheet.getRange(2, 1, last - 1, Math.max(sheet.getLastColumn(), 1)).getValues();
+  for (var i = values.length - 1; i >= 0; i--) {
+    var url = urlCol >= 0 ? String(values[i][urlCol] || "").trim() : "";
+    var company = companyCol >= 0 ? String(values[i][companyCol] || "").trim() : "";
+    var jobId = jobIdCol >= 0 ? String(values[i][jobIdCol] || "").trim() : "";
+    if (!url && !company && !jobId) sheet.deleteRow(i + 2);
+  }
 }
 
 function isLinkedinAppliedYes_(value) {
@@ -476,9 +521,9 @@ function copyAppliedLinkedinJds() {
 function headerColIndex_(sheet, name) {
   var last = Math.max(sheet.getLastColumn(), 1);
   var header = sheet.getRange(1, 1, 1, last).getValues()[0];
-  var want = String(name || "").toLowerCase();
+  var want = normalizeHeaderName_(name);
   for (var i = 0; i < header.length; i++) {
-    if (String(header[i] || "").toLowerCase() === want) return i;
+    if (normalizeHeaderName_(header[i]) === want) return i;
   }
   return -1;
 }
