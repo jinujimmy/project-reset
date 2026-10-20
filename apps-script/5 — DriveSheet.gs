@@ -181,7 +181,8 @@ function reservedTabName_(name) {
   );
 }
 
-function ensureTrackerTabs_() {
+function ensureTrackerTabs_(opts) {
+  opts = opts || {};
   var ss = trackerSheet_();
   var status = ss.getSheetByName(CFG.STATUS_TAB);
   if (!status) {
@@ -201,7 +202,7 @@ function ensureTrackerTabs_() {
     suggestions = ss.insertSheet(CFG.SUGGESTIONS_TAB, 0);
   }
   ensureHeaderRow_(suggestions, suggestionHeaders_());
-  ensureFeedbackDropdown_(suggestions, suggestionHeaders_().length);
+  if (!opts.skipDropdowns) ensureFeedbackDropdown_(suggestions, suggestionHeaders_().length);
 
   var linkedinName = CFG.LINKEDIN_TAB || "Suggestions - Linkedin";
   var linkedin = ss.getSheetByName(linkedinName);
@@ -209,11 +210,13 @@ function ensureTrackerTabs_() {
     linkedin = ss.insertSheet(linkedinName);
   }
   ensureHeaderRow_(linkedin, linkedinHeaders_());
-  compactLinkedinBlankRows_(linkedin);
-  var appliedCol = headerColIndex_(linkedin, "applied") + 1;
-  var feedbackCol = headerColIndex_(linkedin, "feedback") + 1;
-  ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11);
-  ensureAppliedDropdown_(linkedin, appliedCol > 0 ? appliedCol : 12);
+  if (!opts.skipCompact) compactLinkedinBlankRows_(linkedin);
+  if (!opts.skipDropdowns) {
+    var appliedCol = headerColIndex_(linkedin, "applied") + 1;
+    var feedbackCol = headerColIndex_(linkedin, "feedback") + 1;
+    ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11);
+    ensureAppliedDropdown_(linkedin, appliedCol > 0 ? appliedCol : 12);
+  }
 
   var catalog = ensureCatalogTab_(ss);
   return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin, catalog: catalog };
@@ -277,11 +280,21 @@ function compactLinkedinBlankRows_(sheet) {
   var companyCol = headerColIndex_(sheet, "company");
   var jobIdCol = headerColIndex_(sheet, "job_id");
   var values = sheet.getRange(2, 1, last - 1, Math.max(sheet.getLastColumn(), 1)).getValues();
-  for (var i = values.length - 1; i >= 0; i--) {
-    var url = urlCol >= 0 ? String(values[i][urlCol] || "").trim() : "";
-    var company = companyCol >= 0 ? String(values[i][companyCol] || "").trim() : "";
-    var jobId = jobIdCol >= 0 ? String(values[i][jobIdCol] || "").trim() : "";
-    if (!url && !company && !jobId) sheet.deleteRow(i + 2);
+  function isEmpty_(r) {
+    var url = urlCol >= 0 ? String(values[r][urlCol] || "").trim() : "";
+    var company = companyCol >= 0 ? String(values[r][companyCol] || "").trim() : "";
+    var jobId = jobIdCol >= 0 ? String(values[r][jobIdCol] || "").trim() : "";
+    return !url && !company && !jobId;
+  }
+  var r = values.length - 1;
+  while (r >= 0) {
+    if (!isEmpty_(r)) {
+      r -= 1;
+      continue;
+    }
+    var end = r;
+    while (r >= 0 && isEmpty_(r)) r -= 1;
+    sheet.deleteRows(r + 3, end - r);
   }
 }
 

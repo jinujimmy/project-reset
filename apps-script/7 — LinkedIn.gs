@@ -1,9 +1,11 @@
 function importLinkedInJobsFromGmail(optSilent) {
   var digest = optSilent === true;
-  var tabs = ensureTrackerTabs_();
+  var tabs = ensureTrackerTabs_({ skipCompact: true, skipDropdowns: true });
   var sheet = tabs.linkedin;
-  var known = linkedinKnownRows_(sheet);
-  if (!digest) backfillAlertSource_(sheet);
+  var state = linkedinSheetState_(sheet);
+  var known = state.known;
+  var table = state.values;
+  if (!digest) backfillAlertSource_(sheet, table);
   var feedbackSkips = { companies: {}, roles: {} };
   try {
     feedbackSkips = collectFeedbackSkips_();
@@ -16,101 +18,120 @@ function importLinkedInJobsFromGmail(optSilent) {
     "d (label:\"" +
     label +
     "\" OR from:noreply@jobright.ai OR from:donotreply@jobalert.indeed.com OR from:donotreply@match.indeed.com OR from:noreply@glassdoor.com OR from:jobalerts-noreply@linkedin.com OR from:jobs-noreply@linkedin.com)";
-  var added = 0;
+  var pending = [];
+  var dirty = {};
   var seenThisRun = {};
   var start = 0;
-  var pageSize = 40;
+  var pageSize = 50;
   var maxThreads = digest ? CFG.DIGEST_GMAIL_MAX_THREADS || 40 : CFG.LINKEDIN_MAX_THREADS || 120;
+  var started = Date.now();
+  var maxMs = digest ? Math.min(CFG.MAX_RUNTIME_MS || 180000, 45000) : CFG.MAX_RUNTIME_MS || 180000;
 
   while (start < maxThreads) {
+    if (Date.now() - started > maxMs) break;
     var threads = GmailApp.search(query, start, pageSize);
     if (!threads.length) break;
     threads.forEach(function (thread) {
-      var messages = digest ? [thread.getMessages().pop()] : thread.getMessages();
-      messages.forEach(function (msg) {
-        if (!msg) return;
-        var subject = String(msg.getSubject() || "");
-        var html = "";
-        try {
-          html = String(msg.getBody() || "");
-        } catch (eHtml) {}
-        var body = digest ? htmlToAlertText_(html) : linkedinMessageText_(msg);
-        var blob = (html || "") + "\n" + (body || "");
-        var jobs = [];
-        try {
-          jobs = jobs.concat(parseLinkedInJobs_(body, subject));
-        } catch (eLi) {}
-        try {
-          jobs = jobs.concat(parseJobrightJobs_(blob, subject));
-        } catch (eJr) {}
-        try {
-          jobs = jobs.concat(parseIndeedJobs_(blob, subject));
-        } catch (eIn) {}
-        try {
-          jobs = jobs.concat(parseGlassdoorJobs_(blob, subject));
-        } catch (eGd) {}
-        jobs.forEach(function (job) {
-          if (!job.jobId) return;
-          if (known[job.jobId]) {
-            if (!digest || job.source === "Jobright" || job.source === "Glassdoor" || job.source === "LinkedIn" || job.source === "Indeed") {
-              refreshAlertRow_(sheet, known[job.jobId], job, subject);
-            }
-            return;
-          }
-          if (seenThisRun[job.jobId]) return;
-          if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
-          var company = cleanAlertField_(job.company, "company");
-          var role = cleanAlertField_(job.role, "role", company);
-          if (!company && !role) return;
-          seenThisRun[job.jobId] = true;
-          var stamp = torontoParts_(msg.getDate() || new Date());
-          sheet.appendRow([
-            stamp.date,
-            stamp.time,
-            company,
-            role,
-            cleanAlertField_(job.location, "location"),
-            job.url,
-            job.jobId,
-            subject,
-            job.easyApply ? "yes" : "",
-            job.source || alertSourceFromUrl_(job.url),
-            "",
-            "No",
-            ""
-          ]);
-          known[job.jobId] = sheet.getLastRow();
-          added += 1;
-        });
+      if (Date.now() - started > maxMs) return;
+      var msgs = thread.getMessages();
+      var msg = msgs.length ? msgs[msgs.length - 1] : null;
+      if (!msg) return;
+      var subject = String(msg.getSubject() || "");
+      var from = "";
+      try {
+        from = String(msg.getFrom() || "");
+      } catch (eFrom) {}
+      var html = "";
+      try {
+        html = String(msg.getBody() || "");
+      } catch (eHtml) {}
+      var jobs = parseJobsFromAlert_(from, subject, html);
+      var stamp = torontoParts_(msg.getDate() || new Date());
+      jobs.forEach(function (job) {
+        if (!job.jobId) return;
+        if (known[job.jobId]) {
+          queueAlertRefresh_(table, dirty, known[job.jobId], job, subject);
+          return;
+        }
+        if (seenThisRun[job.jobId]) return;
+        if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
+        var company = cleanAlertField_(job.company, "company");
+        var role = cleanAlertField_(job.role, "role", company);
+        if (!company && !role) return;
+        seenThisRun[job.jobId] = true;
+        known[job.jobId] = true;
+        pending.push([
+          stamp.date,
+          stamp.time,
+          company,
+          role,
+          cleanAlertField_(job.location, "location"),
+          job.url,
+          job.jobId,
+          subject,
+          job.easyApply ? "yes" : "",
+          job.source || alertSourceFromUrl_(job.url),
+          "",
+          "No",
+          ""
+        ]);
       });
     });
     if (threads.length < pageSize) break;
     start += pageSize;
   }
 
+  flushAlertRefreshes_(sheet, table, dirty);
+  if (pending.length) {
+    sheet.getRange(state.lastData + 1, 1, pending.length, pending[0].length).setValues(pending);
+  }
   if (optSilent !== true) {
     SpreadsheetApp.getActive().toast(
-      added ? "Added " + added + " job link" + (added === 1 ? "" : "s") : "No new job links"
+      pending.length ? "Added " + pending.length + " job link" + (pending.length === 1 ? "" : "s") : "No new job links"
     );
   }
-  return added;
+  return pending.length;
 }
 
-function linkedinMessageText_(msg) {
-  var plain = "";
-  var html = "";
-  try {
-    plain = String(msg.getPlainBody() || "");
-  } catch (e) {}
-  try {
-    html = String(msg.getBody() || "");
-  } catch (e2) {}
-  html = html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<[^>]+>/g, " ");
-  return decodeLinkedInEntities_(plain + "\n" + html);
+function parseJobsFromAlert_(from, subject, html) {
+  var kind = alertSenderKind_(from, subject, html);
+  var jobs = [];
+  if (kind === "jobright" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseJobrightJobs_(html, subject));
+    } catch (eJr) {}
+  }
+  if (kind === "glassdoor" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseGlassdoorJobs_(html, subject));
+    } catch (eGd) {}
+  }
+  if (kind === "indeed" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseIndeedJobs_(html, subject));
+    } catch (eIn) {}
+  }
+  if (kind === "linkedin" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseLinkedInJobs_(htmlToAlertText_(html), subject));
+    } catch (eLi) {}
+  }
+  return jobs;
+}
+
+function alertSenderKind_(from, subject, html) {
+  var f = String(from || "").toLowerCase();
+  var s = String(subject || "").toLowerCase();
+  if (f.indexOf("jobright") !== -1 || s.indexOf("jobright") !== -1) return "jobright";
+  if (f.indexOf("glassdoor") !== -1) return "glassdoor";
+  if (f.indexOf("indeed") !== -1) return "indeed";
+  if (f.indexOf("linkedin") !== -1) return "linkedin";
+  var h = String(html || "").slice(0, 2500).toLowerCase();
+  if (h.indexOf("jobright.ai") !== -1) return "jobright";
+  if (h.indexOf("glassdoor.com") !== -1) return "glassdoor";
+  if (h.indexOf("indeed.com") !== -1) return "indeed";
+  if (h.indexOf("linkedin.com/jobs") !== -1) return "linkedin";
+  return "all";
 }
 
 function alertSourceFromUrl_(url) {
@@ -122,25 +143,100 @@ function alertSourceFromUrl_(url) {
   return "";
 }
 
-function backfillAlertSource_(sheet) {
-  var values = sheet.getDataRange().getValues();
-  for (var i = 1; i < values.length; i++) {
-    if (String(values[i][9] || "").trim()) continue;
-    var src = alertSourceFromUrl_(values[i][5]);
-    if (src) sheet.getRange(i + 1, 10).setValue(src);
+function backfillAlertSource_(sheet, values) {
+  var rows = values || sheet.getDataRange().getValues();
+  var col = [];
+  var dirty = false;
+  for (var i = 1; i < rows.length; i++) {
+    var src = String(rows[i][9] || "").trim();
+    if (!src) {
+      src = alertSourceFromUrl_(rows[i][5]);
+      if (src) {
+        rows[i][9] = src;
+        dirty = true;
+      }
+    }
+    col.push([src]);
   }
+  if (dirty && col.length) sheet.getRange(2, 10, col.length, 1).setValues(col);
 }
 
-function linkedinKnownRows_(sheet) {
+function linkedinSheetState_(sheet) {
   var known = {};
   var values = sheet.getDataRange().getValues();
+  var lastData = 1;
   for (var i = 1; i < values.length; i++) {
     var id = String(values[i][6] || "").trim();
     var url = String(values[i][5] || "");
+    var company = String(values[i][2] || "").trim();
     if (!id) id = alertJobIdFromUrl_(url);
     if (id) known[id] = i + 1;
+    if (id || url || company) lastData = i + 1;
   }
-  return known;
+  return { known: known, values: values, lastData: lastData };
+}
+
+function alertRowLooksFilled_(rowVals) {
+  var company = String(rowVals[2] || "").trim();
+  var role = String(rowVals[3] || "").trim();
+  if (!company || !role) return false;
+  if (looksLikeCssOrJd_(role) || isLinkedInChrome_(role) || isBlankAlert_(role) || isBlankAlert_(company)) return false;
+  if (isAlertLocationLine_(company)) return false;
+  return true;
+}
+
+function queueAlertRefresh_(table, dirty, row, job, subject) {
+  if (!row || row < 2 || !table[row - 1]) return;
+  var values = table[row - 1];
+  var changed = false;
+  if (job.easyApply && String(values[8] || "") !== "yes") {
+    values[8] = "yes";
+    changed = true;
+  }
+  if (alertRowLooksFilled_(values)) {
+    if (changed) dirty[row] = true;
+    return;
+  }
+  var oldRole = String(values[3] || "").trim();
+  var oldCompany = String(values[2] || "").trim();
+  var oldLoc = String(values[4] || "").trim();
+  var copied =
+    isDigestHeadline_(oldRole, subject) ||
+    isDigestHeadline_(oldCompany, subject) ||
+    isAlertLocationLine_(oldCompany) ||
+    isLinkedInChrome_(oldRole) ||
+    isLinkedInChrome_(oldLoc) ||
+    isBlankAlert_(oldRole) ||
+    isBlankAlert_(oldCompany);
+  var company = cleanAlertField_(job.company, "company");
+  var role = cleanAlertField_(job.role, "role", company || oldCompany);
+  var loc = cleanAlertField_(job.location, "location");
+  if (role && (!oldRole || copied || looksLikeCssOrJd_(oldRole) || isBlankAlert_(oldRole))) {
+    values[3] = role;
+    changed = true;
+  }
+  if (company && (!oldCompany || copied || looksLikeCssOrJd_(oldCompany) || isBlankAlert_(oldCompany))) {
+    values[2] = company;
+    changed = true;
+  }
+  if (loc && (!oldLoc || copied || looksLikeCssOrJd_(oldLoc) || isAlertLocationLine_(oldCompany))) {
+    values[4] = loc;
+    changed = true;
+  }
+  if (changed) dirty[row] = true;
+}
+
+function flushAlertRefreshes_(sheet, table, dirty) {
+  var rows = Object.keys(dirty);
+  if (!rows.length) return;
+  var width = Math.max(table[0] ? table[0].length : 13, 13);
+  for (var i = 0; i < rows.length; i++) {
+    var row = Number(rows[i]);
+    var vals = table[row - 1];
+    if (!vals) continue;
+    while (vals.length < width) vals.push("");
+    sheet.getRange(row, 1, 1, width).setValues([vals.slice(0, width)]);
+  }
 }
 
 function parseLinkedInJobs_(body, subject) {

@@ -62,7 +62,7 @@ function removeDigestTriggers() {
 }
 
 function runDigest_(label) {
-  ensureTrackerTabs_();
+  ensureTrackerTabs_({ skipCompact: true, skipDropdowns: true });
   if (label !== "continue") {
     try {
       importLinkedInJobsFromGmail(true);
