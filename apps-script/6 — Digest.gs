@@ -25,11 +25,20 @@ function onEdit(e) {
   var sheet = e.range.getSheet();
   if (sheet.getName() !== (CFG.LINKEDIN_TAB || "Suggestions - Linkedin")) return;
   if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
-  var appliedCol = headerColIndex_(sheet, "applied") + 1;
-  if (appliedCol < 1 || e.range.getColumn() !== appliedCol) return;
-  if (!isLinkedinAppliedYes_(e.value)) return;
+  var row = e.range.getRow();
+  if (row < 2) return;
+  var statusCol = linkedinApplyStatusCol_(sheet) + 1;
+  var dateCol = headerColIndex_(sheet, "applied_date") + 1;
+  var col = e.range.getColumn();
   try {
-    copyLinkedinJdForRow_(sheet, e.range.getRow());
+    if (dateCol > 0 && col === dateCol && String(e.value || "").trim()) {
+      if (statusCol > 0) sheet.getRange(row, statusCol).setValue("Yes");
+      copyLinkedinJdForRow_(sheet, row);
+      return;
+    }
+    if (statusCol > 0 && col === statusCol && isLinkedinAppliedYes_(e.value)) {
+      copyLinkedinJdForRow_(sheet, row);
+    }
   } catch (err) {}
 }
 

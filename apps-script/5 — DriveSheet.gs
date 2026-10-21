@@ -166,7 +166,8 @@ function linkedinHeaders_() {
     "easy_apply",
     "source",
     "feedback",
-    "applied",
+    "apply_status",
+    "applied_date",
     "drive_doc"
   ];
 }
@@ -209,13 +210,16 @@ function ensureTrackerTabs_(opts) {
   if (!linkedin) {
     linkedin = ss.insertSheet(linkedinName);
   }
+  ensureApplyStatusColumn_(linkedin);
+  ensureAppliedDateColumn_(linkedin);
   ensureHeaderRow_(linkedin, linkedinHeaders_());
   if (!opts.skipCompact) compactLinkedinBlankRows_(linkedin);
   if (!opts.skipDropdowns) {
-    var appliedCol = headerColIndex_(linkedin, "applied") + 1;
+    var statusCol = linkedinApplyStatusCol_(linkedin) + 1;
     var feedbackCol = headerColIndex_(linkedin, "feedback") + 1;
     ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11);
-    ensureAppliedDropdown_(linkedin, appliedCol > 0 ? appliedCol : 12);
+    ensureApplyStatusDropdown_(linkedin, statusCol > 0 ? statusCol : 12);
+    ensureAppliedDateValidation_(linkedin);
   }
 
   var catalog = ensureCatalogTab_(ss);
@@ -237,39 +241,79 @@ function ensureFeedbackDropdown_(sheet, col) {
   sheet.getRange(2, col, n, 1).setDataValidation(rule);
 }
 
-function ensureAppliedDropdown_(sheet, col) {
+function linkedinApplyStatusCol_(sheet) {
+  var i = headerColIndex_(sheet, "apply_status");
+  if (i >= 0) return i;
+  return headerColIndex_(sheet, "applied");
+}
+
+function ensureApplyStatusColumn_(sheet) {
+  if (!sheet) return;
+  if (headerColIndex_(sheet, "apply_status") >= 0) return;
+  var legacy = headerColIndex_(sheet, "applied") + 1;
+  if (legacy < 1) return;
+  sheet.getRange(1, legacy).setValue("apply_status").setFontWeight("bold");
+}
+
+function ensureAppliedDateColumn_(sheet) {
+  if (!sheet) return;
+  if (headerColIndex_(sheet, "applied_date") >= 0) return;
+  var statusCol = linkedinApplyStatusCol_(sheet) + 1;
+  if (statusCol < 1) return;
+  sheet.insertColumnAfter(statusCol);
+  sheet.getRange(1, statusCol + 1).setValue("applied_date").setFontWeight("bold");
+}
+
+function ensureAppliedDateValidation_(sheet) {
+  var dateCol = headerColIndex_(sheet, "applied_date") + 1;
+  if (dateCol < 1) return;
+  var n = dataRowCount_(sheet);
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireDate()
+    .setAllowInvalid(true)
+    .setHelpText("Log the apply date. apply_status becomes Yes when this is filled.")
+    .build();
+  sheet.getRange(2, dateCol, n, 1).setDataValidation(rule);
+}
+
+function ensureApplyStatusDropdown_(sheet, col) {
   if (!col || col < 1) return;
   var n = dataRowCount_(sheet);
   var rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(["No", "Yes"], true)
     .setAllowInvalid(true)
-    .setHelpText("Manual: Yes = applied, No = not applied. Import does not change this.")
+    .setHelpText("Yes if you applied or applied_date is filled. Replaces the old applied column.")
     .build();
   sheet.getRange(2, col, n, 1).setDataValidation(rule);
   var urlCol = headerColIndex_(sheet, "url");
   var companyCol = headerColIndex_(sheet, "company");
+  var dateCol = headerColIndex_(sheet, "applied_date");
   var width = Math.max(sheet.getLastColumn(), col);
   var rows = sheet.getRange(2, 1, n, width).getValues();
-  var appliedVals = [];
+  var statusVals = [];
   var wrote = false;
   for (var i = 0; i < rows.length; i++) {
     var hasJob =
       (urlCol >= 0 && String(rows[i][urlCol] || "").trim()) ||
       (companyCol >= 0 && String(rows[i][companyCol] || "").trim());
     var cur = String(rows[i][col - 1] || "").trim();
-    var low = cur.toLowerCase();
+    var hasDate = dateCol >= 0 && String(rows[i][dateCol] || "").trim();
     var next = cur;
     if (!hasJob) {
       if (cur) {
         next = "";
         wrote = true;
       }
-    } else if (!low || low === "not applied" || low === "no") next = "No";
-    else if (low === "applied" || low === "yes") next = "Yes";
-    if (next !== cur) wrote = true;
-    appliedVals.push([next]);
+    } else if (hasDate && !isLinkedinAppliedYes_(cur)) {
+      next = "Yes";
+      wrote = true;
+    } else if (!cur) {
+      next = "No";
+      wrote = true;
+    }
+    statusVals.push([next]);
   }
-  if (wrote) sheet.getRange(2, col, n, 1).setValues(appliedVals);
+  if (wrote) sheet.getRange(2, col, n, 1).setValues(statusVals);
 }
 
 function compactLinkedinBlankRows_(sheet) {
@@ -372,7 +416,7 @@ function linkedinRowJob_(sheet, rowNumber) {
     url: String(row[col("url")] || "").trim(),
     jobId: String(row[col("job_id")] || "").trim(),
     location: String(row[col("location")] || "").trim(),
-    applied: row[col("applied")],
+    applied: row[col("apply_status") >= 0 ? "apply_status" : "applied"],
     driveDoc: col("drive_doc") >= 0 ? String(row[col("drive_doc")] || "").trim() : "",
     docCol: col("drive_doc")
   };
@@ -460,7 +504,7 @@ function copyLinkedinJdForRow_(sheet, rowNumber) {
 function fileInboxJdPdfs() {
   ensureJdInboxFolder_();
   var sheet = ensureTrackerTabs_().linkedin;
-  var appliedCol = headerColIndex_(sheet, "applied");
+  var appliedCol = linkedinApplyStatusCol_(sheet);
   var last = sheet.getLastRow();
   var filed = 0;
   var unmatched = 0;
@@ -513,7 +557,7 @@ function fileInboxJdPdfs() {
 function copyAppliedLinkedinJds() {
   fileInboxJdPdfs();
   var sheet = ensureTrackerTabs_().linkedin;
-  var appliedCol = headerColIndex_(sheet, "applied");
+  var appliedCol = linkedinApplyStatusCol_(sheet);
   var docCol = headerColIndex_(sheet, "drive_doc");
   if (appliedCol < 0) return;
   var values = sheet.getDataRange().getValues();
@@ -668,14 +712,16 @@ function collectAppliedListingKeys_() {
   }
   var linkedin = tabs.linkedin;
   if (linkedin) {
-    var appliedCol = headerColIndex_(linkedin, "applied");
+    var appliedCol = linkedinApplyStatusCol_(linkedin);
+    var dateCol = headerColIndex_(linkedin, "applied_date");
     var companyCol = headerColIndex_(linkedin, "company");
     var roleCol = headerColIndex_(linkedin, "role");
     var urlCol = headerColIndex_(linkedin, "url");
     var values = linkedin.getDataRange().getValues();
     for (var i = 1; i < values.length; i++) {
-      if (appliedCol >= 0 && !isLinkedinAppliedYes_(values[i][appliedCol])) continue;
-      if (appliedCol < 0) continue;
+      var marked = appliedCol >= 0 && isLinkedinAppliedYes_(values[i][appliedCol]);
+      var dated = dateCol >= 0 && String(values[i][dateCol] || "").trim();
+      if (!marked && !dated) continue;
       add_(
         companyCol >= 0 ? values[i][companyCol] : "",
         roleCol >= 0 ? values[i][roleCol] : "",

@@ -73,6 +73,7 @@ function importLinkedInJobsFromGmail(optSilent) {
           job.source || alertSourceFromUrl_(job.url),
           "",
           "No",
+          "",
           ""
         ]);
       });
@@ -229,13 +230,12 @@ function queueAlertRefresh_(table, dirty, row, job, subject) {
 function flushAlertRefreshes_(sheet, table, dirty) {
   var rows = Object.keys(dirty);
   if (!rows.length) return;
-  var width = Math.max(table[0] ? table[0].length : 13, 13);
   for (var i = 0; i < rows.length; i++) {
     var row = Number(rows[i]);
     var vals = table[row - 1];
     if (!vals) continue;
-    while (vals.length < width) vals.push("");
-    sheet.getRange(row, 1, 1, width).setValues([vals.slice(0, width)]);
+    sheet.getRange(row, 3, 1, 3).setValues([[vals[2], vals[3], vals[4]]]);
+    if (vals[8]) sheet.getRange(row, 9).setValue(vals[8]);
   }
 }
 
