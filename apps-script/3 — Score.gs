@@ -15,17 +15,33 @@ function htmlToPlain_(input) {
 }
 
 function isAlreadyAppliedCompany_(company) {
-  var c = String(company || "").toLowerCase();
-  return APPLIED_COMPANY_SKIP.some(function (name) {
-    return c.indexOf(name) !== -1;
-  });
+  return false;
 }
 
 var CANADA_PLACE_ =
-  /\b(canada|canadian|toronto|vancouver|montreal|montréal|calgary|ottawa|edmonton|winnipeg|halifax|mississauga|brampton|kitchener|waterloo|london,\s*on|ontario|quebec|québec|british columbia|\bbc\b|alberta|manitoba|saskatchewan|nova scotia|new brunswick)\b/i;
+  /\b(canada|canadian|canadawide|canada-wide|gta|greater toronto|greater vancouver|\byyz\b|toronto|north york|scarborough|etobicoke|mississauga|brampton|vaughan|markham|richmond hill|oakville|burlington|hamilton|kitchener|waterloo|cambridge|guelph|london,\s*on|london\s+ontario|windsor|kingston|barrie|oshawa|whitby|ajax|pickering|niagara|st\.?\s*catharines|sudbury|thunder bay|ottawa|gatineau|montreal|montréal|laval|longueuil|quebec city|québec city|quebec|québec|sherbrooke|calgary|edmonton|red deer|lethbridge|vancouver|burnaby|richmond|surrey|coquitlam|kelowna|victoria|nanaimo|winnipeg|regina|saskatoon|halifax|dartmouth|st\.?\s*john'?s|charlottetown|whitehorse|yellowknife|iqaluit|ontario|british columbia|alberta|manitoba|saskatchewan|nova scotia|new brunswick|newfoundland|labrador|prince edward island|\bpei\b|yukon|northwest territories|nunavut)\b/i;
+
+var CANADA_LOCATION_ABBREV_ =
+  /(^|[,\s/(|-])(ON|QC|AB|BC|MB|SK|NS|NB|NL|PE|PEI|YT|NT|NU)(\b|$|[,\s/)|-])/i;
+
+var US_PLACE_ =
+  /\b(united states|u\.s\.a?|usa|u\.s\.\s*only|us only|us-based|based in the us)\b|\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)\b|\b(nyc|new york city|los angeles|san francisco|bay area|silicon valley|seattle|chicago|austin|dallas|houston|boston|miami|atlanta|denver|phoenix|philadelphia|minneapolis|portland)\b|,\s*(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|PR|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b/i;
 
 function mentionsCanada_(text) {
   return CANADA_PLACE_.test(String(text || ""));
+}
+
+function mentionsCanadaLocation_(location) {
+  var loc = String(location || "");
+  if (!loc.trim()) return false;
+  return mentionsCanada_(loc) || CANADA_LOCATION_ABBREV_.test(loc);
+}
+
+function isUsOnlyLocation_(location) {
+  var loc = String(location || "");
+  if (!loc.trim()) return false;
+  if (mentionsCanadaLocation_(loc)) return false;
+  return US_PLACE_.test(loc);
 }
 
 function placeAfterRemote_(location) {
@@ -44,14 +60,14 @@ function placeAfterRemote_(location) {
 
 function isRemoteOtherCountry_(location) {
   if (!/\bremote\b/i.test(String(location || ""))) return false;
-  if (mentionsCanada_(location)) return false;
+  if (mentionsCanadaLocation_(location)) return false;
   return placeAfterRemote_(location).length > 0;
 }
 
 function basedInOtherCountry_(description) {
   var match = String(description || "").match(/\bbased in\s+([^.\n]{2,80})/i);
   if (!match) return false;
-  if (mentionsCanada_(match[1])) return false;
+  if (mentionsCanada_(match[1]) || CANADA_LOCATION_ABBREV_.test(match[1])) return false;
   var rest = match[1]
     .replace(/\b(the|a|an|our|your|location|office|offices|home|region|area)\b/gi, " ")
     .replace(/[^a-z\u00C0-\u024F\s]/gi, " ")
@@ -62,10 +78,11 @@ function basedInOtherCountry_(description) {
 
 function isCanadaEligible_(location, description) {
   var loc = String(location || "");
-  var blob = loc + " " + String(description || "");
+  var desc = String(description || "");
+  if (mentionsCanadaLocation_(loc) || mentionsCanada_(desc)) return true;
+  if (isUsOnlyLocation_(loc)) return false;
   if (isRemoteOtherCountry_(loc)) return false;
-  if (/\bremote\b/i.test(loc) && !mentionsCanada_(loc) && basedInOtherCountry_(description)) return false;
-  if (mentionsCanada_(blob)) return true;
+  if (/\bremote\b/i.test(loc) && basedInOtherCountry_(desc)) return false;
   if (/\bremote\b/i.test(loc)) return true;
   return false;
 }

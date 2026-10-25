@@ -3,13 +3,29 @@ function applicationsRoot_() {
 }
 
 function findChildFolder_(parent, name) {
-  var it = parent.getFoldersByName(name);
-  return it.hasNext() ? it.next() : null;
+  var want = String(name || "").toLowerCase().trim();
+  if (!want) return null;
+  var exact = parent.getFoldersByName(name);
+  if (exact.hasNext()) return exact.next();
+  var it = parent.getFolders();
+  while (it.hasNext()) {
+    var folder = it.next();
+    if (String(folder.getName() || "").toLowerCase().trim() === want) return folder;
+  }
+  return null;
 }
 
 function findChildFile_(parent, name) {
-  var it = parent.getFilesByName(name);
-  return it.hasNext() ? it.next() : null;
+  var want = String(name || "").toLowerCase().trim();
+  if (!want) return null;
+  var exact = parent.getFilesByName(name);
+  if (exact.hasNext()) return exact.next();
+  var it = parent.getFiles();
+  while (it.hasNext()) {
+    var file = it.next();
+    if (String(file.getName() || "").toLowerCase().trim() === want) return file;
+  }
+  return null;
 }
 
 function ensureCompanyFolder_(company) {
@@ -34,7 +50,7 @@ function createRoleDoc_(job, applyDay) {
     job.company,
     job.location,
     job.url,
-    "Match: " + job.matchPercent + "%",
+    "Match: " + (job.matchPercent === "" || job.matchPercent == null ? "n/a" : job.matchPercent + "%"),
     "Recommended apply: " + applyDay,
     "Reasons: " + (job.matchReasons || []).join("; "),
     "",
@@ -93,23 +109,34 @@ function statusHeaders_() {
   ];
 }
 
+function normalizeHeaderName_(value) {
+  var t = String(value || "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (t === "not applied") return "applied";
+  return t;
+}
+
 function ensureHeaderRow_(sheet, headers) {
   var width = headers.length;
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, width).setValues([headers]);
+    sheet.getRange(1, 1, 1, width).clearDataValidations().setFontWeight("bold");
     sheet.setFrozenRows(1);
     return;
   }
   var last = Math.max(sheet.getLastColumn(), width);
   var header = sheet.getRange(1, 1, 1, last).getValues()[0];
-  if (String(header[0]).toLowerCase() !== String(headers[0]).toLowerCase()) {
-    sheet.insertRowBefore(1);
-    sheet.getRange(1, 1, 1, width).setValues([headers]);
-  } else {
-    for (var h = 0; h < headers.length; h++) {
-      if (!String(header[h] || "").trim()) sheet.getRange(1, h + 1).setValue(headers[h]);
-    }
+  var first = normalizeHeaderName_(header[0]);
+  var expected = normalizeHeaderName_(headers[0]);
+  var row1IsData = /^\d{4}-\d{2}-\d{2}/.test(String(header[0] || "").trim()) || first === "yes" || first === "no";
+  if (row1IsData || (first && first !== expected)) {
+    if (first !== expected) sheet.insertRowBefore(1);
   }
+  sheet.getRange(1, 1, 1, width).setValues([headers]);
+  sheet.getRange(1, 1, 1, width).clearDataValidations().setFontWeight("bold");
   sheet.setFrozenRows(1);
 }
 
@@ -138,7 +165,10 @@ function linkedinHeaders_() {
     "email_subject",
     "easy_apply",
     "source",
-    "feedback"
+    "feedback",
+    "apply_status",
+    "applied_date",
+    "drive_doc"
   ];
 }
 
@@ -152,7 +182,8 @@ function reservedTabName_(name) {
   );
 }
 
-function ensureTrackerTabs_() {
+function ensureTrackerTabs_(opts) {
+  opts = opts || {};
   var ss = trackerSheet_();
   var status = ss.getSheetByName(CFG.STATUS_TAB);
   if (!status) {
@@ -172,36 +203,411 @@ function ensureTrackerTabs_() {
     suggestions = ss.insertSheet(CFG.SUGGESTIONS_TAB, 0);
   }
   ensureHeaderRow_(suggestions, suggestionHeaders_());
-  ensureFeedbackDropdown_(suggestions, suggestionHeaders_().length);
+  if (!opts.skipDropdowns) ensureFeedbackDropdown_(suggestions, suggestionHeaders_().length);
 
   var linkedinName = CFG.LINKEDIN_TAB || "Suggestions - Linkedin";
   var linkedin = ss.getSheetByName(linkedinName);
   if (!linkedin) {
     linkedin = ss.insertSheet(linkedinName);
   }
+  ensureApplyStatusColumn_(linkedin);
+  ensureAppliedDateColumn_(linkedin);
   ensureHeaderRow_(linkedin, linkedinHeaders_());
-  ensureFeedbackDropdown_(linkedin, linkedinHeaders_().length);
+  if (!opts.skipCompact) compactLinkedinBlankRows_(linkedin);
+  if (!opts.skipDropdowns) {
+    var statusCol = linkedinApplyStatusCol_(linkedin) + 1;
+    var feedbackCol = headerColIndex_(linkedin, "feedback") + 1;
+    ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11, ["applied"]);
+    ensureApplyStatusDropdown_(linkedin, statusCol > 0 ? statusCol : 12);
+    ensureAppliedDateValidation_(linkedin);
+  }
 
   var catalog = ensureCatalogTab_(ss);
   return { ss: ss, suggestions: suggestions, status: status, linkedin: linkedin, catalog: catalog };
 }
 
-function ensureFeedbackDropdown_(sheet, col) {
-  var last = Math.max(sheet.getLastRow(), 2);
+function dataRowCount_(sheet) {
+  return Math.max(sheet.getLastRow() - 1, 1);
+}
+
+function ensureFeedbackDropdown_(sheet, col, extraLabels) {
+  if (!col || col < 1) return;
+  var n = dataRowCount_(sheet);
+  var labels = ["skip company", "skip role", "expired", "apply later"].concat(extraLabels || []);
   var rule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(["skip company", "skip role", "expired"], true)
+    .requireValueInList(labels, true)
     .setAllowInvalid(true)
-    .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting (same URL or company + role).")
+    .setHelpText("applied = you submitted. skip company = hide this employer. skip role = hide this job title. expired = hide this posting. apply later = keep the row, do not skip next run.")
     .build();
-  sheet.getRange(2, col, last, 1).setDataValidation(rule);
+  sheet.getRange(2, col, n, 1).setDataValidation(rule);
+}
+
+function stampAppliedFeedback_(sheet, row) {
+  var fb = headerColIndex_(sheet, "feedback") + 1;
+  if (fb > 0) sheet.getRange(row, fb).setValue("applied");
+}
+
+function linkedinApplyStatusCol_(sheet) {
+  var i = headerColIndex_(sheet, "apply_status");
+  if (i >= 0) return i;
+  return headerColIndex_(sheet, "applied");
+}
+
+function ensureApplyStatusColumn_(sheet) {
+  if (!sheet) return;
+  if (headerColIndex_(sheet, "apply_status") >= 0) return;
+  var legacy = headerColIndex_(sheet, "applied") + 1;
+  if (legacy < 1) return;
+  sheet.getRange(1, legacy).setValue("apply_status").setFontWeight("bold");
+}
+
+function ensureAppliedDateColumn_(sheet) {
+  if (!sheet) return;
+  if (headerColIndex_(sheet, "applied_date") >= 0) return;
+  var statusCol = linkedinApplyStatusCol_(sheet) + 1;
+  if (statusCol < 1) return;
+  sheet.insertColumnAfter(statusCol);
+  sheet.getRange(1, statusCol + 1).setValue("applied_date").setFontWeight("bold");
+}
+
+function ensureAppliedDateValidation_(sheet) {
+  var dateCol = headerColIndex_(sheet, "applied_date") + 1;
+  if (dateCol < 1) return;
+  var n = dataRowCount_(sheet);
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireDate()
+    .setAllowInvalid(true)
+    .setHelpText("Log the apply date. apply_status becomes Yes when this is filled.")
+    .build();
+  sheet.getRange(2, dateCol, n, 1).setDataValidation(rule);
+}
+
+function ensureApplyStatusDropdown_(sheet, col) {
+  if (!col || col < 1) return;
+  var n = dataRowCount_(sheet);
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["No", "Yes"], true)
+    .setAllowInvalid(true)
+    .setHelpText("Yes if you applied or applied_date is filled. Replaces the old applied column.")
+    .build();
+  sheet.getRange(2, col, n, 1).setDataValidation(rule);
+  var urlCol = headerColIndex_(sheet, "url");
+  var companyCol = headerColIndex_(sheet, "company");
+  var dateCol = headerColIndex_(sheet, "applied_date");
+  var feedbackCol = headerColIndex_(sheet, "feedback");
+  var width = Math.max(sheet.getLastColumn(), col);
+  var rows = sheet.getRange(2, 1, n, width).getValues();
+  var statusVals = [];
+  var feedbackVals = [];
+  var wrote = false;
+  var wroteFb = false;
+  for (var i = 0; i < rows.length; i++) {
+    var hasJob =
+      (urlCol >= 0 && String(rows[i][urlCol] || "").trim()) ||
+      (companyCol >= 0 && String(rows[i][companyCol] || "").trim());
+    var cur = String(rows[i][col - 1] || "").trim();
+    var hasDate = dateCol >= 0 && cellHasDate_(rows[i][dateCol]);
+    var next = cur;
+    if (!hasJob) {
+      if (cur) {
+        next = "";
+        wrote = true;
+      }
+    } else if (hasDate && !isLinkedinAppliedYes_(cur)) {
+      next = "Yes";
+      wrote = true;
+    } else if (!cur) {
+      next = "No";
+      wrote = true;
+    }
+    statusVals.push([next]);
+    if (feedbackCol >= 0) {
+      var fbNow = String(rows[i][feedbackCol] || "").trim();
+      if (hasJob && isLinkedinAppliedYes_(next) && normalizeFeedbackLabel_(fbNow) !== "applied") {
+        feedbackVals.push(["applied"]);
+        wroteFb = true;
+      } else {
+        feedbackVals.push([fbNow]);
+      }
+    }
+  }
+  if (wrote) sheet.getRange(2, col, n, 1).setValues(statusVals);
+  if (wroteFb) sheet.getRange(2, feedbackCol + 1, n, 1).setValues(feedbackVals);
+}
+
+function compactLinkedinBlankRows_(sheet) {
+  if (!sheet) return;
+  var last = sheet.getLastRow();
+  if (last < 2) return;
+  var urlCol = headerColIndex_(sheet, "url");
+  var companyCol = headerColIndex_(sheet, "company");
+  var jobIdCol = headerColIndex_(sheet, "job_id");
+  var values = sheet.getRange(2, 1, last - 1, Math.max(sheet.getLastColumn(), 1)).getValues();
+  function isEmpty_(r) {
+    var url = urlCol >= 0 ? String(values[r][urlCol] || "").trim() : "";
+    var company = companyCol >= 0 ? String(values[r][companyCol] || "").trim() : "";
+    var jobId = jobIdCol >= 0 ? String(values[r][jobIdCol] || "").trim() : "";
+    return !url && !company && !jobId;
+  }
+  var r = values.length - 1;
+  while (r >= 0) {
+    if (!isEmpty_(r)) {
+      r -= 1;
+      continue;
+    }
+    var end = r;
+    while (r >= 0 && isEmpty_(r)) r -= 1;
+    sheet.deleteRows(r + 3, end - r);
+  }
+}
+
+function cellHasDate_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) return true;
+  if (typeof value === "number" && isFinite(value) && value > 20000) return true;
+  var s = String(value || "").trim();
+  if (!s) return false;
+  return !/^no|n\/a|none|false$/i.test(s);
+}
+
+function isLinkedinAppliedYes_(value) {
+  var v = String(value || "").trim().toLowerCase();
+  return v === "yes" || v === "applied";
+}
+
+function ensureJdInboxFolder_() {
+  var root = applicationsRoot_();
+  return findChildFolder_(root, "_Inbox") || root.createFolder("_Inbox");
+}
+
+function looksLikeFullJd_(text) {
+  var t = String(text || "").replace(/\s+/g, " ").trim();
+  if (t.length < 700) return false;
+  if (/sign in|log in to continue|verify you are human|jobright instant alert|you may be a fit|always be the first to apply/i.test(t)) {
+    return false;
+  }
+  return true;
+}
+
+function fetchPublicJd_(url) {
+  var u = String(url || "");
+  if (!/indeed\.com|glassdoor\.com/i.test(u)) return "";
+  try {
+    var res = UrlFetchApp.fetch(u, { muteHttpExceptions: true, followRedirects: true });
+    if (res.getResponseCode() >= 400) return "";
+    var text = htmlToAlertText_(res.getContentText() || "").slice(0, 12000);
+    return looksLikeFullJd_(text) ? text : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function scoreInboxName_(filename, job) {
+  var n = String(filename || "").toLowerCase();
+  var company = String(job.company || "").toLowerCase().trim();
+  var role = String(job.role || "").toLowerCase().trim();
+  var score = 0;
+  if (job.jobId && n.indexOf(String(job.jobId).toLowerCase()) !== -1) score += 6;
+  if (job.url) {
+    var m = String(job.url).match(/[?&](?:jl|jk)=([a-z0-9]+)/i) || String(job.url).match(/\/info\/([a-f0-9]+)/i);
+    if (m && n.indexOf(m[1].toLowerCase()) !== -1) score += 6;
+  }
+  if (company.length >= 4 && n.indexOf(company) !== -1) score += 3;
+  var first = company.split(/\s+/)[0] || "";
+  if (first.length >= 4 && n.indexOf(first) !== -1) score += 2;
+  var words = role.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(function (w) {
+    return w.length > 3;
+  }).slice(0, 5);
+  var hits = 0;
+  words.forEach(function (w) {
+    if (n.indexOf(w) !== -1) hits += 1;
+  });
+  if (hits >= 2) score += 2;
+  return score;
+}
+
+function linkedinRowJob_(sheet, rowNumber) {
+  var width = Math.max(sheet.getLastColumn(), linkedinHeaders_().length);
+  var header = sheet.getRange(1, 1, 1, width).getValues()[0];
+  function col(name) {
+    var want = String(name).toLowerCase();
+    for (var i = 0; i < header.length; i++) {
+      if (String(header[i] || "").toLowerCase() === want) return i;
+    }
+    return -1;
+  }
+  var row = sheet.getRange(rowNumber, 1, 1, width).getValues()[0];
+  return {
+    row: rowNumber,
+    company: String(row[col("company")] || "").trim(),
+    role: String(row[col("role")] || "").trim(),
+    url: String(row[col("url")] || "").trim(),
+    jobId: String(row[col("job_id")] || "").trim(),
+    location: String(row[col("location")] || "").trim(),
+    applied: row[col("apply_status") >= 0 ? "apply_status" : "applied"],
+    driveDoc: col("drive_doc") >= 0 ? String(row[col("drive_doc")] || "").trim() : "",
+    docCol: col("drive_doc")
+  };
+}
+
+function stampLinkedinDriveDoc_(sheet, rowNumber, docCol, url) {
+  if (docCol >= 0 && url) sheet.getRange(rowNumber, docCol + 1).setValue(url);
+}
+
+function placeInboxPdf_(file, company, role) {
+  var folder = ensureCompanyFolder_(company);
+  var dest = role + ".pdf";
+  if (file.getName() !== dest) file.setName(dest);
+  folder.addFile(file);
+  var inbox = findChildFolder_(applicationsRoot_(), "_Inbox");
+  if (inbox) {
+    try {
+      inbox.removeFile(file);
+    } catch (e) {}
+  }
+  return file.getUrl();
+}
+
+function findInboxPdfForJob_(job) {
+  var inbox = findChildFolder_(applicationsRoot_(), "_Inbox");
+  if (!inbox) return null;
+  var it = inbox.getFiles();
+  var best = null;
+  var bestScore = 0;
+  var ties = 0;
+  while (it.hasNext()) {
+    var file = it.next();
+    var mime = String(file.getMimeType() || "");
+    if (mime && mime !== MimeType.PDF && !/\.pdf$/i.test(file.getName())) continue;
+    var score = scoreInboxName_(file.getName(), job);
+    if (score > bestScore) {
+      best = file;
+      bestScore = score;
+      ties = 1;
+    } else if (score === bestScore && score > 0) {
+      ties += 1;
+    }
+  }
+  if (!best || bestScore < 3 || ties > 1) return null;
+  return best;
+}
+
+function copyLinkedinJdForRow_(sheet, rowNumber) {
+  if (rowNumber < 2) return "";
+  var job = linkedinRowJob_(sheet, rowNumber);
+  if (!isLinkedinAppliedYes_(job.applied)) return "";
+  if (job.driveDoc) return job.driveDoc;
+  if (!job.company || !job.role) return "";
+  if (docAlreadyExists_(job.company, job.role)) {
+    var folder = findChildFolder_(applicationsRoot_(), job.company);
+    var existing = folder ? findChildFile_(folder, job.role) : null;
+    var existingUrl = existing ? existing.getUrl() : "";
+    stampLinkedinDriveDoc_(sheet, rowNumber, job.docCol, existingUrl);
+    return existingUrl;
+  }
+  var inboxFile = findInboxPdfForJob_(job);
+  if (inboxFile) {
+    var pdfUrl = placeInboxPdf_(inboxFile, job.company, job.role);
+    stampLinkedinDriveDoc_(sheet, rowNumber, job.docCol, pdfUrl);
+    return pdfUrl;
+  }
+  var desc = fetchPublicJd_(job.url);
+  if (!desc) return "";
+  var driveUrl = createRoleDoc_(
+    {
+      title: job.role,
+      company: job.company,
+      location: job.location,
+      url: job.url,
+      matchPercent: "",
+      matchReasons: ["full posting from the public job page"],
+      description: desc
+    },
+    torontoParts_(new Date()).date
+  );
+  stampLinkedinDriveDoc_(sheet, rowNumber, job.docCol, driveUrl);
+  return driveUrl;
+}
+
+function fileInboxJdPdfs() {
+  ensureJdInboxFolder_();
+  var sheet = ensureTrackerTabs_().linkedin;
+  var appliedCol = linkedinApplyStatusCol_(sheet);
+  var last = sheet.getLastRow();
+  var filed = 0;
+  var unmatched = 0;
+  if (appliedCol < 0 || last < 2) {
+    SpreadsheetApp.getActive().toast("Set up tabs first.");
+    return;
+  }
+  var inbox = findChildFolder_(applicationsRoot_(), "_Inbox");
+  var files = inbox ? inbox.getFiles() : null;
+  if (!files || !files.hasNext()) {
+    SpreadsheetApp.getActive().toast("Applications/_Inbox is empty. Print the posting to PDF and drop it there.");
+    return;
+  }
+  while (files.hasNext()) {
+    var file = files.next();
+    var jobs = [];
+    for (var r = 2; r <= last; r++) {
+      var job = linkedinRowJob_(sheet, r);
+      if (!isLinkedinAppliedYes_(job.applied) || job.driveDoc) continue;
+      jobs.push(job);
+    }
+    var best = null;
+    var bestScore = 0;
+    var ties = 0;
+    jobs.forEach(function (job) {
+      var score = scoreInboxName_(file.getName(), job);
+      if (score > bestScore) {
+        best = job;
+        bestScore = score;
+        ties = 1;
+      } else if (score === bestScore && score > 0) {
+        ties += 1;
+      }
+    });
+    if (!best || bestScore < 3 || ties > 1) {
+      unmatched += 1;
+      continue;
+    }
+    var url = placeInboxPdf_(file, best.company, best.role);
+    stampLinkedinDriveDoc_(sheet, best.row, best.docCol, url);
+    filed += 1;
+  }
+  SpreadsheetApp.getActive().toast(
+    filed
+      ? "Filed " + filed + " PDF" + (filed === 1 ? "" : "s") + " into company folders" + (unmatched ? ". " + unmatched + " left in _Inbox (rename with company name)." : "")
+      : "Could not match inbox PDFs. Rename them like “Tokyo Smoke Data Analyst.pdf”."
+  );
+}
+
+function copyAppliedLinkedinJds() {
+  fileInboxJdPdfs();
+  var sheet = ensureTrackerTabs_().linkedin;
+  var appliedCol = linkedinApplyStatusCol_(sheet);
+  var docCol = headerColIndex_(sheet, "drive_doc");
+  if (appliedCol < 0) return;
+  var values = sheet.getDataRange().getValues();
+  var filed = 0;
+  var missing = 0;
+  for (var i = 1; i < values.length; i++) {
+    if (!isLinkedinAppliedYes_(values[i][appliedCol])) continue;
+    if (docCol >= 0 && String(values[i][docCol] || "").trim()) continue;
+    if (copyLinkedinJdForRow_(sheet, i + 1)) filed += 1;
+    else missing += 1;
+  }
+  SpreadsheetApp.getActive().toast(
+    (filed ? "Filed " + filed + " full JD" + (filed === 1 ? "" : "s") + ". " : "") +
+      (missing ? missing + " applied row(s) still need a print-to-PDF in Applications/_Inbox." : filed ? "" : "No new full JDs.")
+  );
 }
 
 function headerColIndex_(sheet, name) {
   var last = Math.max(sheet.getLastColumn(), 1);
   var header = sheet.getRange(1, 1, 1, last).getValues()[0];
-  var want = String(name || "").toLowerCase();
+  var want = normalizeHeaderName_(name);
   for (var i = 0; i < header.length; i++) {
-    if (String(header[i] || "").toLowerCase() === want) return i;
+    if (normalizeHeaderName_(header[i]) === want) return i;
   }
   return -1;
 }
@@ -319,6 +725,54 @@ function ensureApplicationStatusRow_(job, applyDay, driveUrl, progress, gmailSig
 
 function alreadyRecommendedKey_(company, role) {
   return String(company || "").toLowerCase().trim() + "\t" + String(role || "").toLowerCase().trim();
+}
+
+function collectAppliedListingKeys_() {
+  var tabs = ensureTrackerTabs_();
+  var keys = {};
+  var urls = {};
+  function add_(company, role, url) {
+    var key = alreadyRecommendedKey_(company, role);
+    if (key !== "\t") keys[key] = true;
+    var n = normalizeJobUrl_(url);
+    if (n) urls[n] = true;
+  }
+  var linkedin = tabs.linkedin;
+  if (linkedin) {
+    var appliedCol = linkedinApplyStatusCol_(linkedin);
+    var dateCol = headerColIndex_(linkedin, "applied_date");
+    var companyCol = headerColIndex_(linkedin, "company");
+    var roleCol = headerColIndex_(linkedin, "role");
+    var urlCol = headerColIndex_(linkedin, "url");
+    var values = linkedin.getDataRange().getValues();
+    for (var i = 1; i < values.length; i++) {
+      var marked = appliedCol >= 0 && isLinkedinAppliedYes_(values[i][appliedCol]);
+      var dated = dateCol >= 0 && cellHasDate_(values[i][dateCol]);
+      if (!marked && !dated) continue;
+      add_(
+        companyCol >= 0 ? values[i][companyCol] : "",
+        roleCol >= 0 ? values[i][roleCol] : "",
+        urlCol >= 0 ? values[i][urlCol] : ""
+      );
+    }
+  }
+  var status = tabs.status;
+  if (status) {
+    var rows = status.getDataRange().getValues();
+    for (var s = 1; s < rows.length; s++) {
+      if (!progressMeansApplied_(String(rows[s][5] || ""))) continue;
+      add_(rows[s][1], rows[s][2], rows[s][7]);
+    }
+  }
+  return { keys: keys, urls: urls };
+}
+
+function isAlreadyAppliedListing_(company, role, url, bag) {
+  var applied = bag || collectAppliedListingKeys_();
+  var key = alreadyRecommendedKey_(company, role);
+  if (key !== "\t" && applied.keys && applied.keys[key]) return true;
+  var n = normalizeJobUrl_(url);
+  return Boolean(n && applied.urls && applied.urls[n]);
 }
 
 function collectAlreadyRecommendedKeys_() {

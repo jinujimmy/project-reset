@@ -1,9 +1,11 @@
 function importLinkedInJobsFromGmail(optSilent) {
   var digest = optSilent === true;
-  var tabs = ensureTrackerTabs_();
+  var tabs = ensureTrackerTabs_({ skipCompact: true, skipDropdowns: true });
   var sheet = tabs.linkedin;
-  var known = linkedinKnownRows_(sheet);
-  if (!digest) backfillAlertSource_(sheet);
+  var state = linkedinSheetState_(sheet);
+  var known = state.known;
+  var table = state.values;
+  if (!digest) backfillAlertSource_(sheet, table);
   var feedbackSkips = { companies: {}, roles: {} };
   try {
     feedbackSkips = collectFeedbackSkips_();
@@ -16,94 +18,123 @@ function importLinkedInJobsFromGmail(optSilent) {
     "d (label:\"" +
     label +
     "\" OR from:noreply@jobright.ai OR from:donotreply@jobalert.indeed.com OR from:donotreply@match.indeed.com OR from:noreply@glassdoor.com OR from:jobalerts-noreply@linkedin.com OR from:jobs-noreply@linkedin.com)";
-  var added = 0;
+  var pending = [];
+  var dirty = {};
   var seenThisRun = {};
   var start = 0;
-  var pageSize = 40;
+  var pageSize = 50;
   var maxThreads = digest ? CFG.DIGEST_GMAIL_MAX_THREADS || 40 : CFG.LINKEDIN_MAX_THREADS || 120;
+  var started = Date.now();
+  var maxMs = digest ? Math.min(CFG.MAX_RUNTIME_MS || 180000, 45000) : CFG.MAX_RUNTIME_MS || 180000;
 
   while (start < maxThreads) {
+    if (Date.now() - started > maxMs) break;
     var threads = GmailApp.search(query, start, pageSize);
     if (!threads.length) break;
     threads.forEach(function (thread) {
-      var messages = digest ? [thread.getMessages().pop()] : thread.getMessages();
-      messages.forEach(function (msg) {
-        if (!msg) return;
-        var subject = String(msg.getSubject() || "");
-        var html = "";
-        try {
-          html = String(msg.getBody() || "");
-        } catch (eHtml) {}
-        var body = digest ? htmlToAlertText_(html) : linkedinMessageText_(msg);
-        var blob = (html || "") + "\n" + (body || "");
-        var jobs = [];
-        try {
-          jobs = jobs.concat(parseLinkedInJobs_(body, subject));
-        } catch (eLi) {}
-        try {
-          jobs = jobs.concat(parseJobrightJobs_(blob, subject));
-        } catch (eJr) {}
-        try {
-          jobs = jobs.concat(parseIndeedJobs_(blob, subject));
-        } catch (eIn) {}
-        try {
-          jobs = jobs.concat(parseGlassdoorJobs_(blob, subject));
-        } catch (eGd) {}
-        jobs.forEach(function (job) {
-          if (!job.jobId) return;
-          if (known[job.jobId]) {
-            if (!digest) refreshAlertRow_(sheet, known[job.jobId], job, subject);
-            return;
-          }
-          if (seenThisRun[job.jobId]) return;
-          if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
-          seenThisRun[job.jobId] = true;
-          var stamp = torontoParts_(msg.getDate() || new Date());
-          sheet.appendRow([
-            stamp.date,
-            stamp.time,
-            cleanAlertField_(job.company, "company"),
-            cleanAlertField_(job.role, "role"),
-            cleanAlertField_(job.location, "location"),
-            job.url,
-            job.jobId,
-            subject,
-            job.easyApply ? "yes" : "",
-            job.source || alertSourceFromUrl_(job.url),
-            ""
-          ]);
-          known[job.jobId] = sheet.getLastRow();
-          added += 1;
-        });
+      if (Date.now() - started > maxMs) return;
+      var msgs = thread.getMessages();
+      var msg = msgs.length ? msgs[msgs.length - 1] : null;
+      if (!msg) return;
+      var subject = String(msg.getSubject() || "");
+      var from = "";
+      try {
+        from = String(msg.getFrom() || "");
+      } catch (eFrom) {}
+      var html = "";
+      try {
+        html = String(msg.getBody() || "");
+      } catch (eHtml) {}
+      var jobs = parseJobsFromAlert_(from, subject, html);
+      var stamp = torontoParts_(msg.getDate() || new Date());
+      jobs.forEach(function (job) {
+        if (!job.jobId) return;
+        if (known[job.jobId]) {
+          queueAlertRefresh_(table, dirty, known[job.jobId], job, subject);
+          return;
+        }
+        if (seenThisRun[job.jobId]) return;
+        if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
+        var company = cleanAlertField_(job.company, "company");
+        var role = cleanAlertField_(job.role, "role", company);
+        var location = cleanAlertField_(job.location, "location");
+        if (!company && !role) return;
+        if (isUsOnlyLocation_(location) || isUsOnlyLocation_(job.location)) return;
+        seenThisRun[job.jobId] = true;
+        known[job.jobId] = true;
+        pending.push([
+          stamp.date,
+          stamp.time,
+          company,
+          role,
+          location,
+          job.url,
+          job.jobId,
+          subject,
+          job.easyApply ? "yes" : "",
+          job.source || alertSourceFromUrl_(job.url),
+          "",
+          "No",
+          "",
+          ""
+        ]);
       });
     });
     if (threads.length < pageSize) break;
     start += pageSize;
   }
 
+  flushAlertRefreshes_(sheet, table, dirty);
+  if (pending.length) {
+    sheet.getRange(state.lastData + 1, 1, pending.length, pending[0].length).setValues(pending);
+  }
   if (optSilent !== true) {
     SpreadsheetApp.getActive().toast(
-      added ? "Added " + added + " job link" + (added === 1 ? "" : "s") : "No new job links"
+      pending.length ? "Added " + pending.length + " job link" + (pending.length === 1 ? "" : "s") : "No new job links"
     );
   }
-  return added;
+  return pending.length;
 }
 
-function linkedinMessageText_(msg) {
-  var plain = "";
-  var html = "";
-  try {
-    plain = String(msg.getPlainBody() || "");
-  } catch (e) {}
-  try {
-    html = String(msg.getBody() || "");
-  } catch (e2) {}
-  html = html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<[^>]+>/g, " ");
-  return decodeLinkedInEntities_(plain + "\n" + html);
+function parseJobsFromAlert_(from, subject, html) {
+  var kind = alertSenderKind_(from, subject, html);
+  var jobs = [];
+  if (kind === "jobright" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseJobrightJobs_(html, subject));
+    } catch (eJr) {}
+  }
+  if (kind === "glassdoor" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseGlassdoorJobs_(html, subject));
+    } catch (eGd) {}
+  }
+  if (kind === "indeed" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseIndeedJobs_(html, subject));
+    } catch (eIn) {}
+  }
+  if (kind === "linkedin" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseLinkedInJobs_(htmlToAlertText_(html), subject));
+    } catch (eLi) {}
+  }
+  return jobs;
+}
+
+function alertSenderKind_(from, subject, html) {
+  var f = String(from || "").toLowerCase();
+  var s = String(subject || "").toLowerCase();
+  if (f.indexOf("jobright") !== -1 || s.indexOf("jobright") !== -1) return "jobright";
+  if (f.indexOf("glassdoor") !== -1) return "glassdoor";
+  if (f.indexOf("indeed") !== -1) return "indeed";
+  if (f.indexOf("linkedin") !== -1) return "linkedin";
+  var h = String(html || "").slice(0, 2500).toLowerCase();
+  if (h.indexOf("jobright.ai") !== -1) return "jobright";
+  if (h.indexOf("glassdoor.com") !== -1) return "glassdoor";
+  if (h.indexOf("indeed.com") !== -1) return "indeed";
+  if (h.indexOf("linkedin.com/jobs") !== -1) return "linkedin";
+  return "all";
 }
 
 function alertSourceFromUrl_(url) {
@@ -115,25 +146,99 @@ function alertSourceFromUrl_(url) {
   return "";
 }
 
-function backfillAlertSource_(sheet) {
-  var values = sheet.getDataRange().getValues();
-  for (var i = 1; i < values.length; i++) {
-    if (String(values[i][9] || "").trim()) continue;
-    var src = alertSourceFromUrl_(values[i][5]);
-    if (src) sheet.getRange(i + 1, 10).setValue(src);
+function backfillAlertSource_(sheet, values) {
+  var rows = values || sheet.getDataRange().getValues();
+  var col = [];
+  var dirty = false;
+  for (var i = 1; i < rows.length; i++) {
+    var src = String(rows[i][9] || "").trim();
+    if (!src) {
+      src = alertSourceFromUrl_(rows[i][5]);
+      if (src) {
+        rows[i][9] = src;
+        dirty = true;
+      }
+    }
+    col.push([src]);
   }
+  if (dirty && col.length) sheet.getRange(2, 10, col.length, 1).setValues(col);
 }
 
-function linkedinKnownRows_(sheet) {
+function linkedinSheetState_(sheet) {
   var known = {};
   var values = sheet.getDataRange().getValues();
+  var lastData = 1;
   for (var i = 1; i < values.length; i++) {
     var id = String(values[i][6] || "").trim();
     var url = String(values[i][5] || "");
+    var company = String(values[i][2] || "").trim();
     if (!id) id = alertJobIdFromUrl_(url);
     if (id) known[id] = i + 1;
+    if (id || url || company) lastData = i + 1;
   }
-  return known;
+  return { known: known, values: values, lastData: lastData };
+}
+
+function alertRowLooksFilled_(rowVals) {
+  var company = String(rowVals[2] || "").trim();
+  var role = String(rowVals[3] || "").trim();
+  if (!company || !role) return false;
+  if (looksLikeCssOrJd_(role) || isLinkedInChrome_(role) || isBlankAlert_(role) || isBlankAlert_(company)) return false;
+  if (isAlertLocationLine_(company)) return false;
+  return true;
+}
+
+function queueAlertRefresh_(table, dirty, row, job, subject) {
+  if (!row || row < 2 || !table[row - 1]) return;
+  var values = table[row - 1];
+  var changed = false;
+  if (job.easyApply && String(values[8] || "") !== "yes") {
+    values[8] = "yes";
+    changed = true;
+  }
+  if (alertRowLooksFilled_(values)) {
+    if (changed) dirty[row] = true;
+    return;
+  }
+  var oldRole = String(values[3] || "").trim();
+  var oldCompany = String(values[2] || "").trim();
+  var oldLoc = String(values[4] || "").trim();
+  var copied =
+    isDigestHeadline_(oldRole, subject) ||
+    isDigestHeadline_(oldCompany, subject) ||
+    isAlertLocationLine_(oldCompany) ||
+    isLinkedInChrome_(oldRole) ||
+    isLinkedInChrome_(oldLoc) ||
+    isBlankAlert_(oldRole) ||
+    isBlankAlert_(oldCompany);
+  var company = cleanAlertField_(job.company, "company");
+  var role = cleanAlertField_(job.role, "role", company || oldCompany);
+  var loc = cleanAlertField_(job.location, "location");
+  if (role && (!oldRole || copied || looksLikeCssOrJd_(oldRole) || isBlankAlert_(oldRole))) {
+    values[3] = role;
+    changed = true;
+  }
+  if (company && (!oldCompany || copied || looksLikeCssOrJd_(oldCompany) || isBlankAlert_(oldCompany))) {
+    values[2] = company;
+    changed = true;
+  }
+  if (loc && (!oldLoc || copied || looksLikeCssOrJd_(oldLoc) || isAlertLocationLine_(oldCompany))) {
+    values[4] = loc;
+    changed = true;
+  }
+  if (changed) dirty[row] = true;
+}
+
+function flushAlertRefreshes_(sheet, table, dirty) {
+  var rows = Object.keys(dirty);
+  if (!rows.length) return;
+  for (var i = 0; i < rows.length; i++) {
+    var row = Number(rows[i]);
+    var vals = table[row - 1];
+    if (!vals) continue;
+    sheet.getRange(row, 3, 1, 3).setValues([[vals[2], vals[3], vals[4]]]);
+    if (vals[8]) sheet.getRange(row, 9).setValue(vals[8]);
+  }
 }
 
 function parseLinkedInJobs_(body, subject) {
@@ -148,16 +253,28 @@ function parseLinkedInJobs_(body, subject) {
     if (around.indexOf("search-results") !== -1 && around.indexOf("view job") === -1) continue;
     var before = text.slice(Math.max(0, match.index - 700), match.index);
     var parsed = parseLinkedInCardText_(before);
-    if (!parsed.role) {
+    if (isLinkedInChrome_(parsed.role) || /jobs similar to/i.test(parsed.role)) {
+      parsed.role = "";
+    }
+    if (!parsed.role && !isLinkedInDigestSubject_(subject)) {
       var fromSubject = parseLinkedInSubject_(subject);
-      parsed.role = fromSubject.role;
+      if (fromSubject.role && !isLinkedInChrome_(fromSubject.role) && !isLinkedInDigestSubject_(fromSubject.role)) {
+        parsed.role = fromSubject.role;
+      }
       if (!parsed.company) parsed.company = fromSubject.company;
     }
+    if (isAlertLocationLine_(parsed.company) && looksLikeCompanyName_(parsed.role) && !looksLikeJobTitle_(parsed.role)) {
+      var loc = parsed.company;
+      parsed.company = parsed.role;
+      parsed.role = "";
+      if (!parsed.location) parsed.location = loc;
+    }
+    if (!parsed.company && !parsed.role) continue;
     jobs[jobId] = {
       jobId: jobId,
       url: "https://www.linkedin.com/jobs/view/" + jobId,
-      role: cleanAlertField_(parsed.role, "role"),
       company: cleanAlertField_(parsed.company, "company"),
+      role: cleanAlertField_(parsed.role, "role", parsed.company),
       location: cleanAlertField_(parsed.location, "location"),
       easyApply: /apply with resume|easy apply/i.test(before),
       source: "LinkedIn"
@@ -190,20 +307,44 @@ function parseLinkedInCardText_(chunk) {
       if (/recommendations based on/i.test(line)) return false;
       if (/^this email was intended/i.test(line)) return false;
       if (/ jobs$/i.test(line) && line.split(" ").length <= 4) return false;
+      if (isLinkedInChrome_(line)) return false;
+      if (isBlankAlert_(line)) return false;
       return true;
     });
   var role = "";
   var company = "";
   var location = "";
-  if (lines.length >= 3) {
+  if (lines.length >= 3 && isAlertLocationLine_(lines[lines.length - 1])) {
+    role = lines[lines.length - 3];
+    company = lines[lines.length - 2];
+    location = lines[lines.length - 1];
+  } else if (lines.length >= 2 && isAlertLocationLine_(lines[lines.length - 2]) && looksLikeCompanyName_(lines[lines.length - 1])) {
+    location = lines[lines.length - 2];
+    company = lines[lines.length - 1];
+    role = lines.length >= 3 ? lines[lines.length - 3] : "";
+  } else if (lines.length >= 3) {
     role = lines[lines.length - 3];
     company = lines[lines.length - 2];
     location = lines[lines.length - 1];
   } else if (lines.length === 2) {
-    role = lines[0];
-    company = lines[1];
+    if (isAlertLocationLine_(lines[0]) && looksLikeCompanyName_(lines[1])) {
+      location = lines[0];
+      company = lines[1];
+    } else {
+      role = lines[0];
+      company = lines[1];
+    }
   } else if (lines.length === 1) {
     role = lines[0];
+  }
+  if (isAlertLocationLine_(company) && looksLikeCompanyName_(role) && !looksLikeJobTitle_(role)) {
+    location = location || company;
+    company = role;
+    role = "";
+  }
+  if (isAlertLocationLine_(role)) {
+    location = location || role;
+    role = "";
   }
   return { role: role, company: company, location: location };
 }
@@ -223,8 +364,13 @@ function parseJobrightJobs_(html, subject) {
   while ((match = re.exec(raw))) {
     var jobId = match[1];
     if (jobs[jobId]) continue;
-    var parsed = parseJobrightHtmlCard_(raw.slice(match.index, match.index + 4000));
-    if (!parsed.role) parsed = parseJobrightCardText_(htmlToAlertText_(raw.slice(match.index, match.index + 4000)));
+    var parsed = parseJobrightHtmlCard_(raw.slice(match.index, match.index + 5000));
+    if (!parsed.role || !parsed.company) {
+      var fromText = parseJobrightCardText_(htmlToAlertText_(raw.slice(match.index, match.index + 5000)));
+      if (!parsed.company) parsed.company = fromText.company;
+      if (!parsed.role) parsed.role = fromText.role;
+      if (!parsed.location) parsed.location = fromText.location;
+    }
     if (isDigestHeadline_(parsed.role, subject)) parsed.role = "";
     if (!parsed.role || !parsed.company) {
       var fromSubject = parseJobrightSubject_(subject);
@@ -234,8 +380,8 @@ function parseJobrightJobs_(html, subject) {
     jobs[jobId] = {
       jobId: jobId,
       url: "https://jobright.ai/jobs/info/" + jobId,
-      role: cleanAlertField_(parsed.role, "role"),
       company: cleanAlertField_(parsed.company, "company"),
+      role: cleanAlertField_(parsed.role, "role", parsed.company),
       location: cleanAlertField_(parsed.location, "location"),
       easyApply: false,
       source: "Jobright"
@@ -247,7 +393,22 @@ function parseJobrightJobs_(html, subject) {
 }
 
 function parseJobrightHtmlCard_(chunk) {
-  return parseJobrightCardText_(htmlToAlertText_(chunk));
+  var texts = [];
+  var re = />([^<]{1,140})</g;
+  var m;
+  while ((m = re.exec(String(chunk || "")))) {
+    var t = decodeLinkedInEntities_(m[1]).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    if (!t) continue;
+    if (/^apply now$/i.test(t)) continue;
+    if (/^[\u200b\s]+$/.test(t)) continue;
+    if (/·/.test(t)) continue;
+    if (/^[\d.]+\s*%$/.test(t)) continue;
+    if (/^\$|CA\$|\/yr/i.test(t)) continue;
+    if (/^https?:/i.test(t)) continue;
+    if (/[{}<>]|href=|important|;$|font-|style=/i.test(t)) continue;
+    texts.push(t);
+  }
+  return parseJobrightCardText_(texts.join("\n"));
 }
 
 function parseJobrightCardText_(chunk) {
@@ -277,7 +438,7 @@ function parseJobrightCardText_(chunk) {
   var location = "";
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i];
-    if (/^(remote|hybrid)\b/i.test(line) || /,\s*[A-Z]{2}\b/.test(line) || /\b(toronto|montreal|vancouver|calgary|ottawa|canada)\b/i.test(line)) {
+    if (isAlertLocationLine_(line)) {
       if (!location) location = line;
       continue;
     }
@@ -326,16 +487,20 @@ function indeedTitlesFromHtml_(html) {
 function isDigestHeadline_(text, subject) {
   var t = String(text || "");
   var s = String(subject || "");
-  if (/your top job matches|you would be a great fit|and \d+ more/i.test(t)) return true;
-  if (!/more .+jobs|you would be a great fit|top job matches/i.test(s)) return false;
+  if (/your top job matches|you would be a great fit|and \d+ more|: apply now/i.test(t)) return true;
+  if (!/more .+jobs|you would be a great fit|top job matches|: apply now/i.test(s)) return false;
   var sub = parseAtCompanySubject_(s);
-  return Boolean(t && sub.role && t.toLowerCase() === String(sub.role).toLowerCase());
+  var low = t.toLowerCase();
+  if (sub.role && low === String(sub.role).toLowerCase()) return true;
+  if (sub.company && low === String(sub.company).toLowerCase()) return true;
+  return low === s.toLowerCase();
 }
 
 function looksLikeCssOrJd_(text) {
-  var t = String(text || "").trim();
+  var t = String(text || "").replace(/&nbsp;/gi, " ").trim();
   if (!t) return true;
-  if (/[{}]|font-family|font-weight|margin:|padding:|rgba?\(|!important|display:|text-decoration|border-radius/i.test(t)) {
+  if (/^ant;$/i.test(t) || /href=|^<a\b|^<\//i.test(t)) return true;
+  if (/[{}<>]|font-family|font-weight|margin:|padding:|rgba?\(|!important|display:|text-decoration|border-radius/i.test(t)) {
     return true;
   }
   if (t.length > 80) return true;
@@ -349,6 +514,20 @@ function looksLikeCssOrJd_(text) {
   return false;
 }
 
+function isAlertLocationLine_(line) {
+  var t = String(line || "").trim();
+  if (!t) return false;
+  if (/\b(airport|authority|group|inc\.?|ltd|corp|llc|solutions|health|bank|division)\b/i.test(t)) {
+    return false;
+  }
+  if (/^(remote|hybrid)\b/i.test(t) && t.split(/\s+/).length <= 3) return true;
+  if (/,\s*[A-Z]{2}\b/.test(t) && t.split(/\s+/).length <= 6) return true;
+  return (
+    /^(toronto|montreal|vancouver|calgary|ottawa|edmonton|markham|mississauga|brampton|milton|alberta|ontario|canada)\b/i.test(t) &&
+    t.split(/\s+/).length <= 2
+  );
+}
+
 function looksLikeCompanyName_(text) {
   var t = String(text || "").trim();
   if (looksLikeCssOrJd_(t)) return false;
@@ -356,23 +535,133 @@ function looksLikeCompanyName_(text) {
   return t.length >= 2 && t.length <= 100;
 }
 
-function cleanAlertField_(value, kind) {
-  var t = String(value || "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
+function stripRegionFromRole_(role) {
+  var t = String(role || "").trim();
+  if (/^jobs similar to/i.test(t)) return "";
+  if (/^[A-Za-z .]+,\s*[A-Z]{2}$/.test(t)) return "";
+  if (/^(burlington|regina|milton|toronto|ottawa|cincinnati|finance|marketing|big data|cyber security|artificial intelligence(?:\s*\(ai\))?)$/i.test(t)) {
+    return "";
+  }
+  t = t.replace(/\s*\(#[\w.-]+\)/g, "");
+  t = t.replace(/\s*\(\d{3,5}\)\s*$/g, "");
+  t = t.replace(/\s*[-–—]?\s*FT\s*\([A-Z]?\d[\w-]*\)/gi, "");
+  t = t.replace(/\s*\([A-Z]\d{3,}-\d+\)/g, "");
+  t = t.replace(/\s*\(\s*\d+\s*(?:-|–)?\s*\d*\s*(months?|years?|mos?|weeks?|wks?)\s*(contract)?\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*\d+\s*[-–]?\s*mos?\s*contract\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*\d+\s*[-–]?\s*month\s*contract\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*\d+month\s*contract\s*\)/gi, "");
+  t = t.replace(/\s*\(\s*up to\s+\d+\s+months?\s*\)/gi, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*[-–]?\s*(month|year)s?\s+contract\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+-month\s+contract\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*months?\s*(temporary\s+)?(contract)?\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*yr\.?\s+onsite\b.*$/i, "");
+  t = t.replace(/\s*\(\s*temporary\s*:[^)]+\)/gi, "");
+  t = t.replace(/\s*\((?:contract|hybrid|remote|onsite|on-site)\)/gi, "");
+  t = t.replace(/\s*\(multiple levels\)/gi, "");
+  t = t.replace(/\s*\(aka\.?[^)]*\)/gi, "");
+  t = t.replace(/\s*\(\s*CAN\s*\)/gi, "");
+  t = t.replace(/\s*[-–—]\s*\d{2,5}\s+[A-Z]{2,4}\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*[A-Z]{2,4}\s+\d{2,5}\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*\d+\s*$/g, "");
+  t = t.replace(/\s+L\d\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*(remote|hybrid|contract)\s*$/i, "");
+  t = t.replace(/\s*[-–—]\s*[^,]{2,40},\s*[A-Z]{2}\s*$/i, "");
+  t = t.replace(/\s*\([^()]{2,40},\s*[A-Z]{2}\)\s*$/i, "");
+  t = t.replace(
+    /\s*[-–,]\s*(toronto|montreal|vancouver|calgary|ottawa|edmonton|mississauga|brampton|markham|etobicoke|milton|regina|burlington|canada)\s*$/i,
+    ""
+  );
+  t = t.replace(
+    /\s*[-–—]\s*(toronto|montreal|vancouver|calgary|ottawa|edmonton|mississauga|brampton|markham|etobicoke|milton)\b.*$/i,
+    ""
+  );
+  return t.replace(/[,\s-]+$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function isTitleStartWord_(word) {
+  return /^(senior|junior|staff|lead|leader|principal|manager|analyst|engineer|scientist|consultant|director|associate|specialist|coordinator|developer|product|data|business|program|project|intern|actuarial|financial|marketing|pricing|credit|risk|research|technical|national|master|operations|client|commercial|digital|investment|payroll|privacy|procurement|supply|tax|people|decision|analytics|bilingual|temporary|intermediate|information|workday|microsoft|chief|assistant)$/i.test(
+    word
+  );
+}
+
+function looksLikeEmployerTail_(phrase, company) {
+  var t = String(phrase || "").trim();
+  var c = String(company || "").trim();
+  if (!t || t.length < 3) return false;
+  var tl = t.toLowerCase();
+  var cl = c.toLowerCase();
+  if (cl && (tl === cl || (c.length >= 5 && tl.indexOf(cl) !== -1) || (t.length >= 5 && cl.indexOf(tl) !== -1))) {
+    return true;
+  }
+  if (/\b(inc\.?|ltd\.?|llc|corp\.?|limited)\b/i.test(t)) return true;
+  return /^(tangerine|simplii financial|rogers sports & media|abbott diabetes care)$/i.test(t);
+}
+
+function stripEmployerFromRole_(role, company) {
+  var t = String(role || "").trim();
+  var c = String(company || "").trim();
+  if (c && c.length >= 2) {
+    var esc = c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    t = t.replace(new RegExp("^" + esc + "\\s*[-–—:|]\\s*", "i"), "");
+    t = t.replace(new RegExp("\\s*[-–—|]\\s*" + esc + "\\s*$", "i"), "");
+    t = t.replace(new RegExp("\\s+" + esc + "\\s*$", "i"), "");
+    var first = c.split(/\s+/)[0];
+    if (first.length >= 4 && !isTitleStartWord_(first)) {
+      var fe = first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      t = t.replace(new RegExp("^" + fe + "\\s*[-–—:]\\s+", "i"), "");
+      t = t.replace(new RegExp("\\s+" + fe + "\\s*$", "i"), "");
+    }
+  }
+  var firstRole = t.split(/\s+/)[0] || "";
+  if (!isTitleStartWord_(firstRole)) {
+    t = t.replace(
+      /^[A-Z][A-Za-z0-9.&']{2,}(?:\s+[A-Z][A-Za-z0-9.&']+){0,3}\s*[-–—]\s+(?=(Senior|Staff|Lead|Principal|Manager|Analyst|Engineer|Scientist|Consultant|Director|Associate|Specialist|Coordinator|Developer|Product|Data|Business|Program|Project|Intern)\b)/,
+      ""
+    );
+  }
+  var m = t.match(/\s*[-–—]\s+([^–—-]{2,50})$/);
+  if (m && looksLikeEmployerTail_(m[1], company)) t = t.slice(0, m.index);
+  return t.replace(/[,\s-]+$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeRoleTitle_(role) {
+  var t = String(role || "").trim();
+  t = t.replace(/\bSnr\.\s*/gi, "Senior ");
+  t = t.replace(/\bSr\.\s*/gi, "Senior ");
+  t = t.replace(/\bMgr\.\s*/gi, "Manager ");
+  t = t.replace(/\bSnr\b/gi, "Senior");
+  t = t.replace(/\bSr\b/gi, "Senior");
+  t = t.replace(/\bMgr\b/gi, "Manager");
+  t = t.replace(/,\s*Senior\.?\s*$/i, "");
+  return t.replace(/\s+/g, " ").trim();
+}
+
+function cleanAlertField_(value, kind, company) {
+  var t = decodeLinkedInEntities_(String(value || "")).replace(/\s+/g, " ").trim();
+  if (isBlankAlert_(t)) return "";
   if (kind === "company" && !looksLikeCompanyName_(t)) return "";
   if (kind !== "company" && looksLikeCssOrJd_(t)) return "";
+  if (kind === "role") {
+    t = stripRegionFromRole_(t);
+    t = stripEmployerFromRole_(t, company);
+    t = normalizeRoleTitle_(t);
+  }
   return t;
 }
 
 function applySubjectFallback_(parsed, subject, onlyIfEmpty) {
-  if (onlyIfEmpty && (parsed.role || parsed.company)) return parsed;
-  if (/more .+jobs|you would be a great fit|top job matches/i.test(String(subject || ""))) return parsed;
-  if (!parsed.role) {
-    var fromSubject = parseAtCompanySubject_(subject);
-    parsed.role = fromSubject.role;
-    if (!parsed.company) parsed.company = fromSubject.company;
-    if (!parsed.location) parsed.location = fromSubject.location || "";
+  var s = String(subject || "");
+  var fromSubject = parseAtCompanySubject_(s);
+  var digest = /more .+jobs|you would be a great fit|top job matches|: apply now/i.test(s);
+  if (!parsed.role && fromSubject.role && !isDigestHeadline_(fromSubject.role, s)) {
+    if (!digest || (parsed.company && fromSubject.company && parsed.company.toLowerCase() === fromSubject.company.toLowerCase())) {
+      parsed.role = fromSubject.role;
+    }
   }
+  if (onlyIfEmpty && parsed.company) return parsed;
+  if (digest) return parsed;
+  if (!parsed.company && fromSubject.company) parsed.company = fromSubject.company;
+  if (!parsed.location && fromSubject.location) parsed.location = fromSubject.location;
   return parsed;
 }
 
@@ -384,13 +673,20 @@ function refreshAlertRow_(sheet, row, job, subject) {
   var oldRole = String(values[3] || "").trim();
   var oldCompany = String(values[2] || "").trim();
   var oldLoc = String(values[4] || "").trim();
-  var copied = isDigestHeadline_(oldRole, subject) || isDigestHeadline_(oldCompany, subject);
-  var role = cleanAlertField_(job.role, "role");
+  var copied =
+    isDigestHeadline_(oldRole, subject) ||
+    isDigestHeadline_(oldCompany, subject) ||
+    isAlertLocationLine_(oldCompany) ||
+    isLinkedInChrome_(oldRole) ||
+    isLinkedInChrome_(oldLoc) ||
+    isBlankAlert_(oldRole) ||
+    isBlankAlert_(oldCompany);
   var company = cleanAlertField_(job.company, "company");
+  var role = cleanAlertField_(job.role, "role", company || oldCompany);
   var loc = cleanAlertField_(job.location, "location");
-  if (role && (!oldRole || copied || looksLikeCssOrJd_(oldRole))) sheet.getRange(row, 4).setValue(role);
-  if (company && (!oldCompany || copied || looksLikeCssOrJd_(oldCompany))) sheet.getRange(row, 3).setValue(company);
-  if (loc && (!oldLoc || copied || looksLikeCssOrJd_(oldLoc))) sheet.getRange(row, 5).setValue(loc);
+  if (role && (!oldRole || copied || looksLikeCssOrJd_(oldRole) || isBlankAlert_(oldRole))) sheet.getRange(row, 4).setValue(role);
+  if (company && (!oldCompany || copied || looksLikeCssOrJd_(oldCompany) || isBlankAlert_(oldCompany))) sheet.getRange(row, 3).setValue(company);
+  if (loc && (!oldLoc || copied || looksLikeCssOrJd_(oldLoc) || isAlertLocationLine_(oldCompany))) sheet.getRange(row, 5).setValue(loc);
 }
 
 function parseIndeedJobs_(html, subject) {
@@ -414,8 +710,8 @@ function parseIndeedJobs_(html, subject) {
     jobs[jobId] = {
       jobId: jobId,
       url: "https://www.indeed.com/viewjob?jk=" + jk,
-      role: cleanAlertField_(parsed.role, "role"),
       company: cleanAlertField_(parsed.company, "company"),
+      role: cleanAlertField_(parsed.role, "role", parsed.company),
       location: cleanAlertField_(parsed.location, "location"),
       easyApply: /easily apply/i.test(before),
       source: "Indeed"
@@ -490,17 +786,44 @@ function addGlassdoorJob_(jobs, listingId, chunk, subject) {
     if (!parsed.role) parsed.role = fromText.role;
     if (!parsed.location) parsed.location = fromText.location;
   }
+  parsed = normalizeGlassdoorFields_(parsed);
   if (isDigestHeadline_(parsed.role, subject)) parsed.role = "";
   applySubjectFallback_(parsed, subject, true);
+  parsed = normalizeGlassdoorFields_(parsed);
   jobs[jobId] = {
     jobId: jobId,
     url: "https://www.glassdoor.com/job-listing/job.htm?jl=" + listingId,
-    role: cleanAlertField_(parsed.role, "role"),
     company: cleanAlertField_(parsed.company, "company"),
+    role: cleanAlertField_(parsed.role, "role", parsed.company),
     location: cleanAlertField_(parsed.location, "location"),
     easyApply: /easy apply/i.test(chunk),
     source: "Glassdoor"
   };
+}
+
+function normalizeGlassdoorFields_(parsed) {
+  var company = String((parsed && parsed.company) || "").trim();
+  var role = String((parsed && parsed.role) || "").trim();
+  var location = String((parsed && parsed.location) || "").trim();
+  if (isBlankAlert_(company)) company = "";
+  if (isBlankAlert_(role)) role = "";
+  if (isBlankAlert_(location)) location = "";
+  if (!company && looksLikeCompanyName_(location) && !isAlertLocationLine_(location)) {
+    company = location;
+    location = "";
+  }
+  if (looksLikeJobTitle_(company) && looksLikeCompanyName_(location) && !isAlertLocationLine_(location) && !looksLikeJobTitle_(location)) {
+    var title = company;
+    company = location;
+    location = isAlertLocationLine_(role) ? role : "";
+    role = title;
+  }
+  if (isAlertLocationLine_(role) && company && looksLikeJobTitle_(company)) {
+    location = role;
+    role = company;
+    company = "";
+  }
+  return { role: role, company: company, location: location };
 }
 
 function parseGlassdoorHtmlCard_(chunk) {
@@ -510,7 +833,7 @@ function parseGlassdoorHtmlCard_(chunk) {
   var m;
   while ((m = re.exec(html))) {
     var t = decodeLinkedInEntities_(m[1]).replace(/\s+/g, " ").trim();
-    if (!t) continue;
+    if (isBlankAlert_(t)) continue;
     if (/★|easy apply|glassdoor est|employer est|apply now|^ca\$|^\$|^\d+[dh]$|^\($|^\)/i.test(t)) continue;
     if (looksLikeCssOrJd_(t) && !looksLikeCompanyName_(t)) continue;
     texts.push(t);
@@ -520,22 +843,23 @@ function parseGlassdoorHtmlCard_(chunk) {
   var location = "";
   for (var i = 0; i < texts.length; i++) {
     var line = texts[i];
-    if (/^(remote|hybrid)\b/i.test(line) || /,\s*[A-Z]{2}\b/.test(line) || /^(toronto|ottawa|edmonton|calgary|vancouver|montreal|alberta|ontario|canada|hicksville|findlay|parker|birmingham)\b/i.test(line)) {
+    if (isAlertLocationLine_(line)) {
       if (!location) location = line;
       continue;
     }
     if (!company && looksLikeCompanyName_(line)) {
-      company = line.replace(/\s*\|\s*.+$/, function (rest) {
-        return rest.length > 40 ? "" : rest;
-      }).replace(/\s*\|\s*$/, "").trim() || line.split("|")[0].trim();
+      company = line.split("|")[0].trim();
       continue;
     }
-    if (company && !role && line !== company) {
+    if (company && !role && line !== company && !isBlankAlert_(line)) {
       role = line;
       continue;
     }
+    if (company && role && !location && isAlertLocationLine_(line)) {
+      location = line;
+    }
   }
-  return { role: role, company: company, location: location };
+  return normalizeGlassdoorFields_({ role: role, company: company, location: location });
 }
 
 function parseGlassdoorCardText_(chunk) {
@@ -577,9 +901,12 @@ function parseGlassdoorCardText_(chunk) {
 }
 
 function parseAtCompanySubject_(subject) {
-  var text = String(subject || "").replace(/\s+and \d+ more.*$/i, "").trim();
+  var text = String(subject || "")
+    .replace(/\s+and \d+ more.*$/i, "")
+    .replace(/\.\s+\d+ more.*$/i, "")
+    .trim();
   var at = text.match(/^(.*?)\s+at\s+(.+?)(?:\s+in\s+(.+))?$/i);
-  if (at) return { role: at[1].trim(), company: at[2].replace(/\s*@\s*/g, "").trim(), location: (at[3] || "").trim() };
+  if (at) return { role: at[1].trim(), company: at[2].replace(/\s*@\s*/g, "").replace(/\.$/, "").trim(), location: (at[3] || "").trim() };
   return { role: text, company: "" };
 }
 
@@ -603,6 +930,7 @@ function alertJobIdFromUrl_(url) {
 
 function decodeLinkedInEntities_(text) {
   return String(text || "")
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&#39;|&apos;/gi, "'")
     .replace(/&quot;/gi, '"')
@@ -611,4 +939,28 @@ function decodeLinkedInEntities_(text) {
     .replace(/&#(\d+);/g, function (_, n) {
       return String.fromCharCode(Number(n));
     });
+}
+
+function isBlankAlert_(text) {
+  return !String(text || "").replace(/\u00a0/g, " ").replace(/&nbsp;/gi, " ").trim();
+}
+
+function looksLikeJobTitle_(text) {
+  return /\b(analyst|manager|scientist|engineer|specialist|consultant|coordinator|associate|director|lead|intern)\b/i.test(
+    String(text || "")
+  );
+}
+
+function isLinkedInChrome_(line) {
+  var t = String(line || "").trim();
+  if (!t) return true;
+  if (/\b\d+\s+connections?\b/i.test(t)) return true;
+  if (/^\d+\s+(company alum|school alum)/i.test(t)) return true;
+  if (/jobs similar to|you may be a fit|actively recruiting|fast growing/i.test(t)) return true;
+  if (/^new jobs similar/i.test(t)) return true;
+  return false;
+}
+
+function isLinkedInDigestSubject_(subject) {
+  return /you may be a fit|jobs similar to|actively recruiting|is hiring:/i.test(String(subject || ""));
 }
