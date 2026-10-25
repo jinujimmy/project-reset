@@ -1,16 +1,20 @@
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu("Canada ATS")
-    .addItem("Run digest now", "runDigestNow")
-    .addItem("Set up Suggestions and Application status tabs", "setupTrackerTabs")
-    .addItem("Score Applications folder", "scoreApplicationsFolder")
-    .addItem("Refresh Gmail progress", "refreshGmailProgressOnSheet_")
-    .addItem("Import LinkedIn job links from Gmail", "importLinkedInJobsFromGmail")
-    .addItem("Copy JDs for applied Linkedin rows", "copyAppliedLinkedinJds")
-    .addItem("File inbox PDFs into company folders", "fileInboxJdPdfs")
-    .addSeparator()
-    .addItem("Install 8 AM / 6 PM triggers", "installDigestTriggers")
-    .addItem("Remove digest triggers", "removeDigestTriggers")
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu("Canada ATS")
+    .addItem("Run ATS", "runDigestNow")
+    .addItem("Find job alerts", "importLinkedInJobsFromGmail")
+    .addItem("Set up tabs", "setupTrackerTabs")
+    .addSubMenu(
+      ui
+        .createMenu("More")
+        .addItem("File applied JDs", "copyAppliedLinkedinJds")
+        .addItem("Sync apply status", "syncApplyStatusFromDates")
+        .addItem("Score Applications folder", "scoreApplicationsFolder")
+        .addItem("Refresh Gmail progress", "refreshGmailProgressOnSheet_")
+        .addSeparator()
+        .addItem("Install daily triggers", "installDigestTriggers")
+        .addItem("Remove daily triggers", "removeDigestTriggers")
+    )
     .addToUi();
 }
 
@@ -24,22 +28,46 @@ function onEdit(e) {
   if (!e || !e.range) return;
   var sheet = e.range.getSheet();
   if (sheet.getName() !== (CFG.LINKEDIN_TAB || "Suggestions - Linkedin")) return;
-  if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
-  var row = e.range.getRow();
-  if (row < 2) return;
-  var statusCol = linkedinApplyStatusCol_(sheet) + 1;
-  var dateCol = headerColIndex_(sheet, "applied_date") + 1;
-  var col = e.range.getColumn();
+  var startRow = e.range.getRow();
+  if (startRow + e.range.getNumRows() - 1 < 2) return;
   try {
-    if (dateCol > 0 && col === dateCol && String(e.value || "").trim()) {
-      if (statusCol > 0) sheet.getRange(row, statusCol).setValue("Yes");
-      copyLinkedinJdForRow_(sheet, row);
-      return;
-    }
-    if (statusCol > 0 && col === statusCol && isLinkedinAppliedYes_(e.value)) {
-      copyLinkedinJdForRow_(sheet, row);
+    var statusCol = linkedinApplyStatusCol_(sheet) + 1;
+    var dateCol = headerColIndex_(sheet, "applied_date") + 1;
+    if (statusCol < 1) return;
+    var startCol = e.range.getColumn();
+    var values = e.range.getValues();
+    for (var r = 0; r < values.length; r++) {
+      var row = startRow + r;
+      if (row < 2) continue;
+      for (var c = 0; c < values[r].length; c++) {
+        var col = startCol + c;
+        var val = values[r][c];
+        if (dateCol > 0 && col === dateCol && cellHasDate_(val)) {
+          sheet.getRange(row, statusCol).setValue("Yes");
+          stampAppliedFeedback_(sheet, row);
+          try {
+            copyLinkedinJdForRow_(sheet, row);
+          } catch (jdErr) {}
+        } else if (col === statusCol && isLinkedinAppliedYes_(val)) {
+          stampAppliedFeedback_(sheet, row);
+          try {
+            copyLinkedinJdForRow_(sheet, row);
+          } catch (jdErr2) {}
+        }
+      }
     }
   } catch (err) {}
+}
+
+function syncApplyStatusFromDates() {
+  var sheet = ensureTrackerTabs_().linkedin;
+  var statusCol = linkedinApplyStatusCol_(sheet) + 1;
+  if (statusCol < 1) {
+    SpreadsheetApp.getActive().toast("Set up tabs first so apply_status exists.");
+    return;
+  }
+  ensureApplyStatusDropdown_(sheet, statusCol);
+  SpreadsheetApp.getActive().toast("apply_status is Yes on every row that has an applied_date.");
 }
 
 function runMorningDigest() {

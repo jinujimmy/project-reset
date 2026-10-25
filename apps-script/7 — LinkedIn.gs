@@ -57,7 +57,9 @@ function importLinkedInJobsFromGmail(optSilent) {
         if (isSkippedByFeedback_(job.company, job.role, feedbackSkips, job.url)) return;
         var company = cleanAlertField_(job.company, "company");
         var role = cleanAlertField_(job.role, "role", company);
+        var location = cleanAlertField_(job.location, "location");
         if (!company && !role) return;
+        if (isUsOnlyLocation_(location) || isUsOnlyLocation_(job.location)) return;
         seenThisRun[job.jobId] = true;
         known[job.jobId] = true;
         pending.push([
@@ -65,7 +67,7 @@ function importLinkedInJobsFromGmail(optSilent) {
           stamp.time,
           company,
           role,
-          cleanAlertField_(job.location, "location"),
+          location,
           job.url,
           job.jobId,
           subject,

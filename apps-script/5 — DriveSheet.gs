@@ -217,7 +217,7 @@ function ensureTrackerTabs_(opts) {
   if (!opts.skipDropdowns) {
     var statusCol = linkedinApplyStatusCol_(linkedin) + 1;
     var feedbackCol = headerColIndex_(linkedin, "feedback") + 1;
-    ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11);
+    ensureFeedbackDropdown_(linkedin, feedbackCol > 0 ? feedbackCol : 11, ["applied"]);
     ensureApplyStatusDropdown_(linkedin, statusCol > 0 ? statusCol : 12);
     ensureAppliedDateValidation_(linkedin);
   }
@@ -230,15 +230,21 @@ function dataRowCount_(sheet) {
   return Math.max(sheet.getLastRow() - 1, 1);
 }
 
-function ensureFeedbackDropdown_(sheet, col) {
+function ensureFeedbackDropdown_(sheet, col, extraLabels) {
   if (!col || col < 1) return;
   var n = dataRowCount_(sheet);
+  var labels = ["skip company", "skip role", "expired", "apply later"].concat(extraLabels || []);
   var rule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(["skip company", "skip role", "expired", "apply later"], true)
+    .requireValueInList(labels, true)
     .setAllowInvalid(true)
-    .setHelpText("skip company = hide this employer. skip role = hide this job title. expired = hide this posting. apply later = keep the row, do not skip next run.")
+    .setHelpText("applied = you submitted. skip company = hide this employer. skip role = hide this job title. expired = hide this posting. apply later = keep the row, do not skip next run.")
     .build();
   sheet.getRange(2, col, n, 1).setDataValidation(rule);
+}
+
+function stampAppliedFeedback_(sheet, row) {
+  var fb = headerColIndex_(sheet, "feedback") + 1;
+  if (fb > 0) sheet.getRange(row, fb).setValue("applied");
 }
 
 function linkedinApplyStatusCol_(sheet) {
@@ -288,16 +294,19 @@ function ensureApplyStatusDropdown_(sheet, col) {
   var urlCol = headerColIndex_(sheet, "url");
   var companyCol = headerColIndex_(sheet, "company");
   var dateCol = headerColIndex_(sheet, "applied_date");
+  var feedbackCol = headerColIndex_(sheet, "feedback");
   var width = Math.max(sheet.getLastColumn(), col);
   var rows = sheet.getRange(2, 1, n, width).getValues();
   var statusVals = [];
+  var feedbackVals = [];
   var wrote = false;
+  var wroteFb = false;
   for (var i = 0; i < rows.length; i++) {
     var hasJob =
       (urlCol >= 0 && String(rows[i][urlCol] || "").trim()) ||
       (companyCol >= 0 && String(rows[i][companyCol] || "").trim());
     var cur = String(rows[i][col - 1] || "").trim();
-    var hasDate = dateCol >= 0 && String(rows[i][dateCol] || "").trim();
+    var hasDate = dateCol >= 0 && cellHasDate_(rows[i][dateCol]);
     var next = cur;
     if (!hasJob) {
       if (cur) {
@@ -312,8 +321,18 @@ function ensureApplyStatusDropdown_(sheet, col) {
       wrote = true;
     }
     statusVals.push([next]);
+    if (feedbackCol >= 0) {
+      var fbNow = String(rows[i][feedbackCol] || "").trim();
+      if (hasJob && isLinkedinAppliedYes_(next) && normalizeFeedbackLabel_(fbNow) !== "applied") {
+        feedbackVals.push(["applied"]);
+        wroteFb = true;
+      } else {
+        feedbackVals.push([fbNow]);
+      }
+    }
   }
   if (wrote) sheet.getRange(2, col, n, 1).setValues(statusVals);
+  if (wroteFb) sheet.getRange(2, feedbackCol + 1, n, 1).setValues(feedbackVals);
 }
 
 function compactLinkedinBlankRows_(sheet) {
@@ -340,6 +359,14 @@ function compactLinkedinBlankRows_(sheet) {
     while (r >= 0 && isEmpty_(r)) r -= 1;
     sheet.deleteRows(r + 3, end - r);
   }
+}
+
+function cellHasDate_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) return true;
+  if (typeof value === "number" && isFinite(value) && value > 20000) return true;
+  var s = String(value || "").trim();
+  if (!s) return false;
+  return !/^no|n\/a|none|false$/i.test(s);
 }
 
 function isLinkedinAppliedYes_(value) {
@@ -720,7 +747,7 @@ function collectAppliedListingKeys_() {
     var values = linkedin.getDataRange().getValues();
     for (var i = 1; i < values.length; i++) {
       var marked = appliedCol >= 0 && isLinkedinAppliedYes_(values[i][appliedCol]);
-      var dated = dateCol >= 0 && String(values[i][dateCol] || "").trim();
+      var dated = dateCol >= 0 && cellHasDate_(values[i][dateCol]);
       if (!marked && !dated) continue;
       add_(
         companyCol >= 0 ? values[i][companyCol] : "",
