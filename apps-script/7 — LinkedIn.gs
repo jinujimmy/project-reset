@@ -17,7 +17,7 @@ function importLinkedInJobsFromGmail(optSilent) {
     days +
     "d (label:\"" +
     label +
-    "\" OR from:noreply@jobright.ai OR from:donotreply@jobalert.indeed.com OR from:donotreply@match.indeed.com OR from:noreply@glassdoor.com OR from:jobalerts-noreply@linkedin.com OR from:jobs-noreply@linkedin.com)";
+    "\" OR from:noreply@jobright.ai OR from:donotreply@jobalert.indeed.com OR from:donotreply@match.indeed.com OR from:noreply@glassdoor.com OR from:hiring.cafe OR from:jobalerts-noreply@linkedin.com OR from:jobs-noreply@linkedin.com)";
   var pending = [];
   var dirty = {};
   var seenThisRun = {};
@@ -119,6 +119,11 @@ function parseJobsFromAlert_(from, subject, html) {
       jobs = jobs.concat(parseLinkedInJobs_(htmlToAlertText_(html), subject));
     } catch (eLi) {}
   }
+  if (kind === "hiringcafe" || kind === "all") {
+    try {
+      jobs = jobs.concat(parseHiringCafeJobs_(html, subject));
+    } catch (eHc) {}
+  }
   return jobs;
 }
 
@@ -128,11 +133,13 @@ function alertSenderKind_(from, subject, html) {
   if (f.indexOf("jobright") !== -1 || s.indexOf("jobright") !== -1) return "jobright";
   if (f.indexOf("glassdoor") !== -1) return "glassdoor";
   if (f.indexOf("indeed") !== -1) return "indeed";
+  if (f.indexOf("hiring.cafe") !== -1 || f.indexOf("hiringcafe") !== -1) return "hiringcafe";
   if (f.indexOf("linkedin") !== -1) return "linkedin";
   var h = String(html || "").slice(0, 2500).toLowerCase();
   if (h.indexOf("jobright.ai") !== -1) return "jobright";
   if (h.indexOf("glassdoor.com") !== -1) return "glassdoor";
   if (h.indexOf("indeed.com") !== -1) return "indeed";
+  if (h.indexOf("hiring.cafe") !== -1 || h.indexOf("hiringcafe") !== -1) return "hiringcafe";
   if (h.indexOf("linkedin.com/jobs") !== -1) return "linkedin";
   return "all";
 }
@@ -143,6 +150,7 @@ function alertSourceFromUrl_(url) {
   if (u.indexOf("jobright.ai") !== -1) return "Jobright";
   if (u.indexOf("indeed.com") !== -1) return "Indeed";
   if (u.indexOf("glassdoor.com") !== -1) return "Glassdoor";
+  if (u.indexOf("hiring.cafe") !== -1 || u.indexOf("hiringcafe") !== -1) return "Hiring Cafe";
   return "";
 }
 
@@ -354,6 +362,77 @@ function parseLinkedInSubject_(subject) {
   var at = text.match(/^(.*?)\s+at\s+(.+)$/i);
   if (at) return { role: at[1].trim(), company: at[2].trim() };
   return { role: text, company: "" };
+}
+
+function hiringCafeJobId_(company, role) {
+  var key =
+    String(company || "")
+      .toLowerCase()
+      .trim() +
+    "\t" +
+    String(role || "")
+      .toLowerCase()
+      .trim();
+  return (
+    "hc_" +
+    key
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_|_$/g, "")
+      .slice(0, 80)
+  );
+}
+
+function parseHiringCafeJobs_(html, subject) {
+  var raw = decodeLinkedInEntities_(String(html || "").replace(/\r/g, "\n"));
+  var jobs = {};
+  function add_(role, company, location, url) {
+    role = cleanAlertField_(role, "role", company);
+    company = cleanAlertField_(company, "company");
+    location = cleanAlertField_(location, "location");
+    if (!company || !role) return;
+    if (/^(apply|view all|ai search)$/i.test(role)) return;
+    if (isDigestHeadline_(role, subject)) return;
+    var jobId = hiringCafeJobId_(company, role);
+    if (!jobId || jobs[jobId]) return;
+    var href = String(url || "").trim();
+    if (!href || /unsubscribe|dashboard|sendgrid\.net\/wf\/open/i.test(href)) {
+      href = "https://hiring.cafe/jobs/" + encodeURIComponent(role).replace(/%20/g, "-");
+    }
+    jobs[jobId] = {
+      jobId: jobId,
+      url: href,
+      company: company,
+      role: role,
+      location: location,
+      easyApply: false,
+      source: "Hiring Cafe"
+    };
+  }
+  var card =
+    /<h3[\s\S]{0,400}?<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]{1,160}?)<\/a>[\s\S]{0,80}?<\/h3>\s*<div[^>]*>\s*([^<]{2,180})\s*<\/div>/gi;
+  var m;
+  while ((m = card.exec(raw))) {
+    var title = String(m[2] || "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    var rest = String(m[3] || "").replace(/\s+/g, " ").trim();
+    var parts = rest.split(/\s+[—–-]\s+/);
+    add_(title, parts[0] || "", parts.slice(1).join(" — "), m[1]);
+  }
+  if (!Object.keys(jobs).length) {
+    var text = htmlToAlertText_(raw);
+    var bullet = /(?:^|\n)\s*[•\u2022]\s*(.+?)\s+[—–]\s+(.+?)\s+[—–]\s+([^\n]+)/g;
+    var b;
+    while ((b = bullet.exec(text))) {
+      var after = text.slice(b.index, b.index + 900);
+      var apply = after.match(/Apply:\s*(https?:\/\/[^\s]+)/i);
+      add_(b[1], b[2], b[3], apply ? apply[1] : "");
+    }
+  }
+  return Object.keys(jobs).map(function (id) {
+    return jobs[id];
+  });
 }
 
 function parseJobrightJobs_(html, subject) {
@@ -925,6 +1004,8 @@ function alertJobIdFromUrl_(url) {
   if (indeed && /indeed\.com/i.test(u)) return "indeed_" + indeed[1];
   var gd = u.match(/jobListingId=(\d+)/i) || u.match(/[?&]jl=(\d+)/i);
   if (gd && /glassdoor\.com/i.test(u)) return "gd_" + gd[1];
+  var hc = u.match(/hiring\.cafe\/job\/([^/?#]+)/i);
+  if (hc) return "hc_" + hc[1];
   return "";
 }
 
